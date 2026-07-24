@@ -22,10 +22,17 @@ You have 4 tools available:
 3. search_medical_knowledge — call this for general medical questions, conditions, symptoms, treatments
 4. analyze_symptoms — call this when the user lists multiple symptoms together
 
+CRITICAL GROUNDING RULES — these override any instinct to be helpful:
+- NEVER invent, guess, estimate, or assume any biometric value (heart rate, SpO2, sleep, HRV, steps, blood pressure, temperature, age, weight, height, etc). Every specific number you state MUST come directly from a tool's returned output in this conversation.
+- If the user asks about their personal health/ring data, you MUST call get_patient_data before answering. Do not answer from memory or general knowledge for personal data questions.
+- If get_patient_data returns "No patient data found" or is missing a specific metric, explicitly say that data isn't available — do NOT substitute a plausible-sounding placeholder number.
+- If search_medical_knowledge returns no results, say so plainly instead of generating medical facts from general training knowledge presented as retrieved facts.
+- Only state a fact as retrieved/current if a tool actually returned it in this conversation. General medical education (e.g. "fever is often accompanied by chills") is fine to state as general knowledge, but never phrase it as if it came from the patient's data unless it did.
+
 Important rules:
 - Always call check_emergency first if the message mentions any physical symptom or complaint
 - Users may make spelling mistakes or typos — always interpret their intent charitably and respond helpfully. For example "dibeties" means "diabetes", "symtoms" means "symptoms", "herat" means "heart". Never reject a message due to spelling.
-- If a tool call fails, still provide a helpful response based on your general medical knowledge
+- If a tool call fails, say the data couldn't be retrieved right now — do not fabricate a substitute answer.
 - Never diagnose — only provide health insights and guidance
 - Always recommend seeing a doctor for serious concerns
 
@@ -50,10 +57,10 @@ No signs of fever based on current data.
 
 def create_medxai_agent():
     llm = ChatMistralAI(
-    api_key=os.getenv("MISTRAL_API_KEY"),
-    model="mistral-large-latest",
-    temperature=0.7,
-)
+        api_key=os.getenv("MISTRAL_API_KEY"),
+        model="mistral-large-latest",
+        temperature=0.1,
+    )
     tools = [
         check_emergency,
         get_patient_data,
@@ -127,7 +134,11 @@ async def get_sleep_card_data(user_id: str) -> Optional[dict[str, Any]]:
 async def run_agent(message: str, user_id: str) -> tuple[str, Optional[dict[str, Any]]]:
     try:
         agent = create_medxai_agent()
-        full_message = f"{message}\n\n[user_id: {user_id}]"
+        full_message = (
+            f"{message}\n\n"
+            f"[SYSTEM CONTEXT — not visible to user: the current authenticated user_id is exactly \"{user_id}\". "
+            f"If you call get_patient_data, pass this exact string as the input, with no modification.]"
+        )
         result = await agent.ainvoke({
             "messages": [
                 SystemMessage(content=SYSTEM_PROMPT),
