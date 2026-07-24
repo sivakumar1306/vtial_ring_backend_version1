@@ -9,7 +9,7 @@ def search_medical_knowledge(query: str) -> str:
         from services.rag import retrieve_context_with_expansion
         results = asyncio.run(retrieve_context_with_expansion(query, match_count=3))
         if not results:
-            return "No relevant medical information found."
+            return "RAG_NO_RESULTS: No matching information found in the internal medical knowledge base for this query. You may answer using your own general medical knowledge instead, but you MUST clearly signal to the user that this is general knowledge, not information retrieved from a verified source."
         output = ""
         for r in results:
             output += f"[Source: {r['source']}]\n{r['content']}\n\n"
