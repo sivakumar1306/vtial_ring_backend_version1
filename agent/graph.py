@@ -1,4 +1,4 @@
-from langchain_groq import ChatGroq
+from langchain_mistralai import ChatMistralAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 from agent.tools import (
@@ -60,9 +60,9 @@ No live heart rate reading is available right now.
 """
 
 def create_medxai_agent():
-    llm = ChatGroq(
-        api_key=os.getenv("GROQ_API_KEY"),
-        model="llama-3.3-70b-versatile",
+    llm = ChatMistralAI(
+        api_key=os.getenv("MISTRAL_API_KEY"),
+        model="mistral-large-latest",
         temperature=0.1,
     )
     tools = [
