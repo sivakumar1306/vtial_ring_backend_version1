@@ -1,5 +1,20 @@
 from langchain_core.tools import tool
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from db.supabase import supabase
+
+# All measured_at / date-ish timestamps from Supabase are stored in UTC.
+# Convert to IST before handing them to the LLM so replies show the user's
+# actual local time instead of raw UTC (e.g. "15:51" showing when it's
+# really 21:21 for the user).
+def _to_ist(iso_str) -> str:
+    if not iso_str:
+        return "unknown time"
+    try:
+        dt = datetime.fromisoformat(str(iso_str).replace("Z", "+00:00"))
+        return dt.astimezone(ZoneInfo("Asia/Kolkata")).strftime("%H:%M on %d %B %Y")
+    except Exception:
+        return str(iso_str)
 
 @tool
 def search_medical_knowledge(query: str) -> str:
@@ -62,7 +77,6 @@ PATIENT PROFILE:
                 .execute()
             if current_hr.data:
                 c = current_hr.data[0]
-                from datetime import datetime, timezone
                 measured_at_str = c.get("measured_at")
                 staleness_note = ""
                 try:
@@ -72,7 +86,8 @@ PATIENT PROFILE:
                         staleness_note = f" [STALE: this reading is {age_hours:.1f} hours old, NOT real-time]"
                 except Exception:
                     pass
-                context += f"\nCURRENT HEART RATE (most recent single reading in DB): {c.get('value_bpm')} bpm, measured at {measured_at_str}{staleness_note}\n"
+                measured_at_local = _to_ist(measured_at_str)
+                context += f"\nCURRENT HEART RATE (most recent single reading in DB): {c.get('value_bpm')} bpm, measured at {measured_at_local}{staleness_note}\n"
             else:
                 context += "\nCURRENT HEART RATE: NO reading found in database for this user.\n"
         except Exception as e:
@@ -117,7 +132,7 @@ PATIENT PROFILE:
             .execute()
         if bp.data:
             b = bp.data[0]
-            context += f"\nLATEST BLOOD PRESSURE: {b.get('systolic')}/{b.get('diastolic')} (measured {b.get('measured_at')})\n"
+            context += f"\nLATEST BLOOD PRESSURE: {b.get('systolic')}/{b.get('diastolic')} (measured {_to_ist(b.get('measured_at'))})\n"
 
         result = context.strip() if context else "No patient data found."
         print(f"[get_patient_data] user_id={user_id}\n---TOOL OUTPUT SENT TO LLM---\n{result}\n---END TOOL OUTPUT---")
