@@ -51,17 +51,32 @@ PATIENT PROFILE:
 
         # Live/current reading — from the raw per-measurement table, NOT the daily
         # aggregate (user_hr only has avg/min/max per day, no single "current" value).
-        current_hr = supabase.table("user_hr_readings")\
-            .select("*")\
-            .eq("user_id", user_id)\
-            .order("measured_at", desc=True)\
-            .limit(1)\
-            .execute()
-        if current_hr.data:
-            c = current_hr.data[0]
-            context += f"\nCURRENT HEART RATE (live, most recent single reading): {c.get('value_bpm')} bpm, measured at {c.get('measured_at')}\n"
-        else:
-            context += "\nCURRENT HEART RATE: no live reading available.\n"
+        # Isolated in its own try/except so a failure here can't wipe out the rest
+        # of the patient context (profile, sleep, etc.) via the outer except below.
+        try:
+            current_hr = supabase.table("user_hr_readings")\
+                .select("*")\
+                .eq("user_id", user_id)\
+                .order("measured_at", desc=True)\
+                .limit(1)\
+                .execute()
+            if current_hr.data:
+                c = current_hr.data[0]
+                from datetime import datetime, timezone
+                measured_at_str = c.get("measured_at")
+                staleness_note = ""
+                try:
+                    measured_dt = datetime.fromisoformat(measured_at_str.replace("Z", "+00:00"))
+                    age_hours = (datetime.now(timezone.utc) - measured_dt).total_seconds() / 3600
+                    if age_hours > 3:
+                        staleness_note = f" [STALE: this reading is {age_hours:.1f} hours old, NOT real-time]"
+                except Exception:
+                    pass
+                context += f"\nCURRENT HEART RATE (most recent single reading in DB): {c.get('value_bpm')} bpm, measured at {measured_at_str}{staleness_note}\n"
+            else:
+                context += "\nCURRENT HEART RATE: NO reading found in database for this user.\n"
+        except Exception as e:
+            context += f"\nCURRENT HEART RATE: query failed ({str(e)}). Do NOT guess a value.\n"
 
         sleep = latest("user_sleep")
         if sleep:
@@ -104,9 +119,13 @@ PATIENT PROFILE:
             b = bp.data[0]
             context += f"\nLATEST BLOOD PRESSURE: {b.get('systolic')}/{b.get('diastolic')} (measured {b.get('measured_at')})\n"
 
-        return context.strip() if context else "No patient data found."
+        result = context.strip() if context else "No patient data found."
+        print(f"[get_patient_data] user_id={user_id}\n---TOOL OUTPUT SENT TO LLM---\n{result}\n---END TOOL OUTPUT---")
+        return result
     except Exception as e:
-        return f"Failed to fetch patient data: {str(e)}"
+        error_msg = f"Failed to fetch patient data: {str(e)}"
+        print(f"[get_patient_data] ERROR for user_id={user_id}: {error_msg}")
+        return error_msg
 
 @tool
 def check_emergency(message: str) -> str:
