@@ -123,14 +123,20 @@ async def get_insights(user_id: str, range: str = "30D"):
                 })
 
         # --- Resting heart rate (user_hr: date, avg_hr) ---
+        # "alarming" is based purely on the CURRENT resting HR value crossing
+        # a clinically meaningful threshold (>=100 bpm resting = tachycardia
+        # range), not on how much it moved during the period. A rapid swing
+        # that stays within a normal resting range (e.g. 80 -> 90 bpm) is a
+        # trend worth surfacing, but it should not be flagged as "needs
+        # attention" the same way an actually-elevated reading is.
         hr_rows = _rows_in_range("user_hr", user_id, days, "date")
         first, second = _split_avg(hr_rows, "avg_hr")
         if first is not None:
             delta_hr = round(second - first)
             latest_avg_hr = hr_rows[-1].get("avg_hr") if hr_rows else None
-            if abs(delta_hr) >= 5 or (latest_avg_hr and latest_avg_hr >= 100):
+            alarming = latest_avg_hr is not None and latest_avg_hr >= 100
+            if abs(delta_hr) >= 5 or alarming:
                 improving = delta_hr <= 0  # lower resting HR trend = improving
-                alarming = (latest_avg_hr is not None and latest_avg_hr >= 100) or delta_hr >= 8
                 changes.append({
                     "key": "heart_rate",
                     "title": "Heart rate",
@@ -145,6 +151,9 @@ async def get_insights(user_id: str, range: str = "30D"):
                 })
 
         # --- Blood pressure (user_bp: measured_at, systolic, diastolic) ---
+        # Same principle as heart rate: "alarming" reflects the CURRENT
+        # reading crossing a hypertensive threshold, not the size of the
+        # trend/delta by itself.
         bp_rows = _bp_rows_in_range(user_id, days)
         first_s, second_s = _split_avg(bp_rows, "systolic")
         if first_s is not None:
@@ -154,7 +163,7 @@ async def get_insights(user_id: str, range: str = "30D"):
             hypertensive = (latest_systolic and latest_systolic >= 130) or (latest_diastolic and latest_diastolic >= 80)
             if abs(delta_s) >= 5 or hypertensive:
                 improving = delta_s <= 0
-                alarming = hypertensive or delta_s >= 8
+                alarming = hypertensive
                 changes.append({
                     "key": "blood_pressure",
                     "title": "Blood pressure",
