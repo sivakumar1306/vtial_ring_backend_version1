@@ -9,7 +9,7 @@ def search_medical_knowledge(query: str) -> str:
         from services.rag import retrieve_context_with_expansion
         results = asyncio.run(retrieve_context_with_expansion(query, match_count=3))
         if not results:
-            return "RAG_NO_RESULTS: No matching information found in the internal medical knowledge base for this query. You may answer using your own general medical knowledge instead, but you MUST clearly signal to the user that this is general knowledge, not information retrieved from a verified source."
+            return "No relevant medical information found."
         output = ""
         for r in results:
             output += f"[Source: {r['source']}]\n{r['content']}\n\n"
@@ -49,6 +49,20 @@ PATIENT PROFILE:
                 .execute()
             return r.data or []
 
+        # Live/current reading — from the raw per-measurement table, NOT the daily
+        # aggregate (user_hr only has avg/min/max per day, no single "current" value).
+        current_hr = supabase.table("user_hr_readings")\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .order("measured_at", desc=True)\
+            .limit(1)\
+            .execute()
+        if current_hr.data:
+            c = current_hr.data[0]
+            context += f"\nCURRENT HEART RATE (live, most recent single reading): {c.get('value_bpm')} bpm, measured at {c.get('measured_at')}\n"
+        else:
+            context += "\nCURRENT HEART RATE: no live reading available.\n"
+
         sleep = latest("user_sleep")
         if sleep:
             context += "\nRECENT SLEEP:\n"
@@ -58,7 +72,7 @@ PATIENT PROFILE:
 
         hr = latest("user_hr")
         if hr:
-            context += "\nRECENT HEART RATE:\n"
+            context += "\nHISTORICAL DAILY HEART RATE (NOT the current/live reading):\n"
             for day in reversed(hr):
                 context += f"- {day.get('date')}: avg {day.get('avg_hr')} bpm (min {day.get('min_hr')}, max {day.get('max_hr')})\n"
 

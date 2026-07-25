@@ -1,4 +1,4 @@
-from langchain_mistralai import ChatMistralAI
+from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 from agent.tools import (
@@ -22,19 +22,15 @@ You have 4 tools available:
 3. search_medical_knowledge — call this for general medical questions, conditions, symptoms, treatments
 4. analyze_symptoms — call this when the user lists multiple symptoms together
 
-CRITICAL GROUNDING RULES — these override any instinct to be helpful:
-- NEVER invent, guess, estimate, or assume any biometric value (heart rate, SpO2, sleep, HRV, steps, blood pressure, temperature, age, weight, height, etc). Every specific number you state MUST come directly from a tool's returned output in this conversation.
-- If the user asks about their personal health/ring data, you MUST call get_patient_data before answering. Do not answer from memory or general knowledge for personal data questions.
-- If get_patient_data returns "No patient data found" or is missing a specific metric, explicitly say that data isn't available — do NOT substitute a plausible-sounding placeholder number.
-- If search_medical_knowledge returns a message starting with "RAG_NO_RESULTS", the internal knowledge base has nothing on this topic. You may then answer using your own general medical knowledge, but you MUST make this clear to the user — for example, phrase it as "there's no specific record on this in our knowledge base, but generally..." rather than stating it as a verified fact. Never present fallback general knowledge as if it came from search results.
-- Only state a fact as retrieved/current if a tool actually returned it in this conversation. General medical education (e.g. "fever is often accompanied by chills") is fine to state as general knowledge, but never phrase it as if it came from the patient's data unless it did.
-
 Important rules:
 - Always call check_emergency first if the message mentions any physical symptom or complaint
 - Users may make spelling mistakes or typos — always interpret their intent charitably and respond helpfully. For example "dibeties" means "diabetes", "symtoms" means "symptoms", "herat" means "heart". Never reject a message due to spelling.
-- If a tool call fails, say the data couldn't be retrieved right now — do not fabricate a substitute answer.
+- If a tool call fails, still provide a helpful response based on your general medical knowledge
 - Never diagnose — only provide health insights and guidance
 - Always recommend seeing a doctor for serious concerns
+- CRITICAL — DATA ACCURACY: Only state numeric values (heart rate, blood pressure, SpO2, steps, etc.) that appear VERBATIM in the get_patient_data tool output. Never estimate, round, infer, average, or invent a number that isn't explicitly present in the tool result.
+- When asked for the "current" or "live" heart rate specifically, use ONLY the value labeled "CURRENT HEART RATE" in the tool output. Do NOT substitute a value from "HISTORICAL DAILY HEART RATE" (those are daily avg/min/max, not current). If the tool says no live reading is available, say so plainly instead of guessing.
+- Do not fabricate field labels or stats (e.g. "resting average", "recent max") that are not literally present in the tool output.
 
 RESPONSE FORMAT — STRICTLY FOLLOW THIS:
 - Use precise clinical/medical terminology (e.g. "tachycardia" instead of "fast heart rate", "hyperglycemia" instead of "high blood sugar"). Add a brief plain-language clarification in parentheses the first time you use an uncommon term.
@@ -47,18 +43,26 @@ RESPONSE FORMAT — STRICTLY FOLLOW THIS:
 
 Example format:
 No signs of fever based on current data.
-- Heart rate: 90 bpm (within normal range)
+- Current heart rate: 90 bpm (within normal range)
 - SpO2: 97% (normal oxygen saturation)
 - No temperature reading available
 - Monitor for chills, body aches, or fatigue
 - Consult a doctor if fever develops or persists
 - This is general health information, not medical advice.
+
+Example when asked specifically for current/live heart rate and the tool has no live reading:
+No live heart rate reading is available right now.
+- Most recent daily average was 84 bpm (from historical data)
+- This is not the same as a real-time reading
+- Open the ring app to take a fresh measurement
+- Consult a doctor if you feel unwell
+- This is general health information, not medical advice.
 """
 
 def create_medxai_agent():
-    llm = ChatMistralAI(
-        api_key=os.getenv("MISTRAL_API_KEY"),
-        model="mistral-large-latest",
+    llm = ChatGroq(
+        api_key=os.getenv("GROQ_API_KEY"),
+        model="llama-3.3-70b-versatile",
         temperature=0.1,
     )
     tools = [
@@ -134,11 +138,7 @@ async def get_sleep_card_data(user_id: str) -> Optional[dict[str, Any]]:
 async def run_agent(message: str, user_id: str) -> tuple[str, Optional[dict[str, Any]]]:
     try:
         agent = create_medxai_agent()
-        full_message = (
-            f"{message}\n\n"
-            f"[SYSTEM CONTEXT — not visible to user: the current authenticated user_id is exactly \"{user_id}\". "
-            f"If you call get_patient_data, pass this exact string as the input, with no modification.]"
-        )
+        full_message = f"{message}\n\n[user_id: {user_id}]"
         result = await agent.ainvoke({
             "messages": [
                 SystemMessage(content=SYSTEM_PROMPT),
