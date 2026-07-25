@@ -222,9 +222,9 @@ async def get_insights(user_id: str, range: str = "30D"):
             ]
             other_improving = [c["title"] for c in changes if c.get("improving") and not c["alarming"]]
             if other_improving:
-                subtext = f"{', '.join(other_improving)} improved this period, but {worst['title'].lower()} stands out. Tap the card below to dig in."
+                subtext = f"{', '.join(other_improving)} improved this period, but {worst['title'].lower()} needs closer attention. See the details below."
             else:
-                subtext = f"{worst['title']} stands out this period. Tap the card below to dig in."
+                subtext = f"{worst['title']} needs closer attention this period. See the details below."
         else:
             improving = [c["title"] for c in changes if c.get("improving")]
             declining = [c["title"] for c in changes if not c.get("improving")]
@@ -238,7 +238,7 @@ async def get_insights(user_id: str, range: str = "30D"):
                 ]
             else:
                 headline_parts = [{"text": "A few metrics need a closer look", "highlight": False}]
-            subtext = "Tap any change below to dig in." if changes else ""
+            subtext = "Select any change below for more detail." if changes else ""
 
         return {
             "range": range,
