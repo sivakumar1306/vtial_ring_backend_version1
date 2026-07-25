@@ -124,17 +124,16 @@ async def get_insights(user_id: str, range: str = "30D"):
 
         # --- Resting heart rate (user_hr: date, avg_hr) ---
         # "alarming" is based purely on the CURRENT resting HR value crossing
-        # a clinically meaningful threshold (>=100 bpm resting = tachycardia
-        # range), not on how much it moved during the period. A rapid swing
-        # that stays within a normal resting range (e.g. 80 -> 90 bpm) is a
-        # trend worth surfacing, but it should not be flagged as "needs
-        # attention" the same way an actually-elevated reading is.
+        # a clinically meaningful threshold (normally >=100 bpm resting =
+        # tachycardia range), not on how much it moved during the period.
+        # TEMP TEST: threshold lowered to 85 to verify the alarming state
+        # renders correctly live. Revert to 100 after confirming.
         hr_rows = _rows_in_range("user_hr", user_id, days, "date")
         first, second = _split_avg(hr_rows, "avg_hr")
         if first is not None:
             delta_hr = round(second - first)
             latest_avg_hr = hr_rows[-1].get("avg_hr") if hr_rows else None
-            alarming = latest_avg_hr is not None and latest_avg_hr >= 100
+            alarming = latest_avg_hr is not None and latest_avg_hr >= 85  # TEMP: was 100
             if abs(delta_hr) >= 5 or alarming:
                 improving = delta_hr <= 0  # lower resting HR trend = improving
                 changes.append({
