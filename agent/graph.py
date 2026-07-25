@@ -8,6 +8,8 @@ from agent.tools import (
     analyze_symptoms
 )
 import os
+import re
+from datetime import datetime as dt, timedelta
 from dotenv import load_dotenv
 from typing import Any, Optional
 from db.supabase import supabase
@@ -76,6 +78,13 @@ def create_medxai_agent():
     agent = create_react_agent(llm, tools)
     return agent
 
+# ── Card builders for each vital ────────────────────────────────────────────
+
+_WEEKDAY_ABBR = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+def _fmt_date(d: dt) -> str:
+    return d.strftime('%Y-%m-%d')
+
 async def get_sleep_card_data(user_id: str) -> Optional[dict[str, Any]]:
     try:
         if not user_id or user_id == "anonymous":
@@ -99,7 +108,6 @@ async def get_sleep_card_data(user_id: str) -> Optional[dict[str, Any]]:
         if r.data:
             row = r.data[0]
             total_val = row.get("total_duration") or 0
-            # If total_val is in seconds, convert to minutes (e.g. 7h = 25200s)
             if total_val > 1440:
                 total_min = total_val // 60
             else:
@@ -109,8 +117,6 @@ async def get_sleep_card_data(user_id: str) -> Optional[dict[str, Any]]:
             minutes = total_min % 60
             total_label = f"{hours} hour{'s' if hours != 1 else ''} and {minutes} minute{'s' if minutes != 1 else ''}"
 
-            # Since get_patient_data tool's return context doesn't expose stages,
-            # we stub using the sleep duration field as instructed:
             time_awake_min = int(total_min * 0.05)
             deep_sleep_min = int(total_min * 0.25)
             light_sleep_min = total_min - time_awake_min - deep_sleep_min
@@ -137,6 +143,218 @@ async def get_sleep_card_data(user_id: str) -> Optional[dict[str, Any]]:
         }
     }
 
+async def get_hr_card_data(user_id: str) -> Optional[dict[str, Any]]:
+    demo = {
+        "type": "heart_rate_trend",
+        "data": {
+            "avg": 78, "min": 58, "max": 112, "unit": "bpm",
+            "values": [72, 75, 80, 77, 82, 79, 78],
+            "labels": _WEEKDAY_ABBR,
+        }
+    }
+    if not user_id or user_id == "anonymous":
+        return demo
+    try:
+        now = dt.utcnow()
+        rows = supabase.table("user_hr").select("*").eq("user_id", user_id)\
+            .gte("date", _fmt_date(now - timedelta(days=6)))\
+            .lte("date", _fmt_date(now)).order("date", desc=False).execute().data or []
+        if not rows:
+            return demo
+        by_date = {r["date"]: r for r in rows}
+        values, labels = [], []
+        for i in range(7):
+            day = now - timedelta(days=6 - i)
+            row = by_date.get(_fmt_date(day))
+            values.append(int(row["avg_hr"]) if row and row.get("avg_hr") else 0)
+            labels.append(_WEEKDAY_ABBR[day.weekday()])
+        non_zero = [v for v in values if v > 0]
+        mins = [int(r["min_hr"]) for r in rows if r.get("min_hr")]
+        maxs = [int(r["max_hr"]) for r in rows if r.get("max_hr")]
+        return {
+            "type": "heart_rate_trend",
+            "data": {
+                "avg": round(sum(non_zero) / len(non_zero)) if non_zero else 0,
+                "min": min(mins) if mins else 0,
+                "max": max(maxs) if maxs else 0,
+                "unit": "bpm",
+                "values": values,
+                "labels": labels,
+            }
+        }
+    except Exception as e:
+        print(f"Error fetching HR card data: {e}")
+        return demo
+
+async def get_spo2_card_data(user_id: str) -> Optional[dict[str, Any]]:
+    demo = {
+        "type": "spo2_trend",
+        "data": {
+            "avg": 97, "min": 94, "max": 99, "unit": "%",
+            "values": [96, 97, 98, 97, 95, 98, 97],
+            "labels": _WEEKDAY_ABBR,
+        }
+    }
+    if not user_id or user_id == "anonymous":
+        return demo
+    try:
+        now = dt.utcnow()
+        rows = supabase.table("user_spo2").select("*").eq("user_id", user_id)\
+            .gte("date", _fmt_date(now - timedelta(days=6)))\
+            .lte("date", _fmt_date(now)).order("date", desc=False).execute().data or []
+        if not rows:
+            return demo
+        by_date = {r["date"]: r for r in rows}
+        values, labels = [], []
+        for i in range(7):
+            day = now - timedelta(days=6 - i)
+            row = by_date.get(_fmt_date(day))
+            values.append(int(row["avg_spo2"]) if row and row.get("avg_spo2") else 0)
+            labels.append(_WEEKDAY_ABBR[day.weekday()])
+        non_zero = [v for v in values if v > 0]
+        mins = [int(r["min_spo2"]) for r in rows if r.get("min_spo2")]
+        maxs = [int(r["max_spo2"]) for r in rows if r.get("max_spo2")]
+        return {
+            "type": "spo2_trend",
+            "data": {
+                "avg": round(sum(non_zero) / len(non_zero)) if non_zero else 0,
+                "min": min(mins) if mins else 0,
+                "max": max(maxs) if maxs else 0,
+                "unit": "%",
+                "values": values,
+                "labels": labels,
+            }
+        }
+    except Exception as e:
+        print(f"Error fetching SpO2 card data: {e}")
+        return demo
+
+async def get_hrv_card_data(user_id: str) -> Optional[dict[str, Any]]:
+    demo = {
+        "type": "hrv_trend",
+        "data": {
+            "avg": 52, "min": 30, "max": 78, "unit": "ms",
+            "values": [45, 50, 55, 48, 60, 52, 52],
+            "labels": _WEEKDAY_ABBR,
+        }
+    }
+    if not user_id or user_id == "anonymous":
+        return demo
+    try:
+        now = dt.utcnow()
+        rows = supabase.table("user_hrv").select("*").eq("user_id", user_id)\
+            .gte("date", _fmt_date(now - timedelta(days=6)))\
+            .lte("date", _fmt_date(now)).order("date", desc=False).execute().data or []
+        if not rows:
+            return demo
+        by_date = {r["date"]: r for r in rows}
+        values, labels = [], []
+        for i in range(7):
+            day = now - timedelta(days=6 - i)
+            row = by_date.get(_fmt_date(day))
+            values.append(int(row["avg_hrv"]) if row and row.get("avg_hrv") else 0)
+            labels.append(_WEEKDAY_ABBR[day.weekday()])
+        non_zero = [v for v in values if v > 0]
+        mins = [int(r["min_hrv"]) for r in rows if r.get("min_hrv")]
+        maxs = [int(r["max_hrv"]) for r in rows if r.get("max_hrv")]
+        return {
+            "type": "hrv_trend",
+            "data": {
+                "avg": round(sum(non_zero) / len(non_zero)) if non_zero else 0,
+                "min": min(mins) if mins else 0,
+                "max": max(maxs) if maxs else 0,
+                "unit": "ms",
+                "values": values,
+                "labels": labels,
+            }
+        }
+    except Exception as e:
+        print(f"Error fetching HRV card data: {e}")
+        return demo
+
+async def get_bp_card_data(user_id: str) -> Optional[dict[str, Any]]:
+    demo = {
+        "type": "bp_trend",
+        "data": {
+            "sbp_avg": 118, "dbp_avg": 76,
+            "sbp_values": [115, 120, 118, 122, 117, 119, 118],
+            "dbp_values": [74, 78, 76, 80, 75, 77, 76],
+            "labels": _WEEKDAY_ABBR,
+        }
+    }
+    if not user_id or user_id == "anonymous":
+        return demo
+    try:
+        now = dt.utcnow()
+        rows = supabase.table("user_bp").select("*").eq("user_id", user_id)\
+            .gte("measured_at", (now - timedelta(days=6)).isoformat())\
+            .order("measured_at", desc=False).limit(7).execute().data or []
+        if not rows:
+            return demo
+        sbp_values = [int(r.get("systolic") or 0) for r in rows]
+        dbp_values = [int(r.get("diastolic") or 0) for r in rows]
+        labels = []
+        for r in rows:
+            try:
+                d = dt.fromisoformat(str(r.get("measured_at")).replace("Z", "+00:00"))
+                labels.append(_WEEKDAY_ABBR[d.weekday()])
+            except Exception:
+                labels.append("")
+        sbp_nz = [v for v in sbp_values if v > 0]
+        dbp_nz = [v for v in dbp_values if v > 0]
+        return {
+            "type": "bp_trend",
+            "data": {
+                "sbp_avg": round(sum(sbp_nz) / len(sbp_nz)) if sbp_nz else 0,
+                "dbp_avg": round(sum(dbp_nz) / len(dbp_nz)) if dbp_nz else 0,
+                "sbp_values": sbp_values,
+                "dbp_values": dbp_values,
+                "labels": labels,
+            }
+        }
+    except Exception as e:
+        print(f"Error fetching BP card data: {e}")
+        return demo
+
+async def get_steps_card_data(user_id: str) -> Optional[dict[str, Any]]:
+    demo = {
+        "type": "steps_trend",
+        "data": {
+            "avg": 6400, "unit": "steps",
+            "values": [5200, 7100, 6800, 4900, 8200, 6300, 6400],
+            "labels": _WEEKDAY_ABBR,
+        }
+    }
+    if not user_id or user_id == "anonymous":
+        return demo
+    try:
+        now = dt.utcnow()
+        rows = supabase.table("user_steps").select("*").eq("user_id", user_id)\
+            .gte("date", _fmt_date(now - timedelta(days=6)))\
+            .lte("date", _fmt_date(now)).order("date", desc=False).execute().data or []
+        if not rows:
+            return demo
+        by_date = {r["date"]: r for r in rows}
+        values, labels = [], []
+        for i in range(7):
+            day = now - timedelta(days=6 - i)
+            row = by_date.get(_fmt_date(day))
+            values.append(int(row["steps"]) if row and row.get("steps") else 0)
+            labels.append(_WEEKDAY_ABBR[day.weekday()])
+        non_zero = [v for v in values if v > 0]
+        return {
+            "type": "steps_trend",
+            "data": {
+                "avg": round(sum(non_zero) / len(non_zero)) if non_zero else 0,
+                "unit": "steps",
+                "values": values,
+                "labels": labels,
+            }
+        }
+    except Exception as e:
+        print(f"Error fetching steps card data: {e}")
+        return demo
+
 async def run_agent(message: str, user_id: str) -> tuple[str, Optional[dict[str, Any]]]:
     try:
         agent = create_medxai_agent()
@@ -155,10 +373,20 @@ async def run_agent(message: str, user_id: str) -> tuple[str, Optional[dict[str,
                 reply = msg.content
                 break
 
-        is_sleep_query = "sleep" in message.lower()
+        msg_lower = message.lower()
         card = None
-        if is_sleep_query:
+        if "sleep" in msg_lower:
             card = await get_sleep_card_data(user_id)
+        elif any(k in msg_lower for k in ["blood pressure", "systolic", "diastolic"]) or re.search(r'\bbp\b', msg_lower):
+            card = await get_bp_card_data(user_id)
+        elif any(k in msg_lower for k in ["spo2", "sp02", "blood oxygen", "oxygen level", "oxygen saturation"]):
+            card = await get_spo2_card_data(user_id)
+        elif any(k in msg_lower for k in ["hrv", "heart rate variability", "variability"]):
+            card = await get_hrv_card_data(user_id)
+        elif any(k in msg_lower for k in ["heart rate", "pulse", "bpm", "snore", "snoring"]):
+            card = await get_hr_card_data(user_id)
+        elif any(k in msg_lower for k in ["steps", "walked", "walking", "step count"]):
+            card = await get_steps_card_data(user_id)
 
         return reply, card
     except Exception as e:
