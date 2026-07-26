@@ -72,6 +72,7 @@ PATIENT PROFILE:
             current_hr = supabase.table("user_hr_readings")\
                 .select("*")\
                 .eq("user_id", user_id)\
+                .neq("source", "demo_seed")\
                 .order("measured_at", desc=True)\
                 .limit(1)\
                 .execute()
