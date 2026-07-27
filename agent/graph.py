@@ -78,7 +78,7 @@ def get_medxai_agent():
         t0 = time.monotonic()
         llm = ChatMistralAI(
             api_key=os.getenv("MISTRAL_API_KEY"),
-            model="mistral-large-latest",
+            model="mistral-small-latest",
             temperature=0.1,
         )
         tools = [
