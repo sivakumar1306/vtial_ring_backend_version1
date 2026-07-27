@@ -1,4 +1,5 @@
 import asyncio
+import time
 from langchain_mistralai import ChatMistralAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
@@ -74,6 +75,7 @@ _AGENT = None
 def get_medxai_agent():
     global _AGENT
     if _AGENT is None:
+        t0 = time.monotonic()
         llm = ChatMistralAI(
             api_key=os.getenv("MISTRAL_API_KEY"),
             model="mistral-large-latest",
@@ -86,6 +88,7 @@ def get_medxai_agent():
             analyze_symptoms
         ]
         _AGENT = create_react_agent(llm, tools)
+        print(f"[TIMING] Agent construction (first call only, cached after): {time.monotonic() - t0:.2f}s")
     return _AGENT
 
 
@@ -404,7 +407,11 @@ async def get_steps_card_data(user_id: str) -> Optional[dict[str, Any]]:
 
 async def run_agent(message: str, user_id: str) -> tuple[str, Optional[dict[str, Any]]]:
     try:
+        t_start = time.monotonic()
+
         agent = get_medxai_agent()
+        t_agent_ready = time.monotonic()
+
         full_message = f"{message}\n\n[user_id: {user_id}]"
         result = await agent.ainvoke({
             "messages": [
@@ -412,6 +419,7 @@ async def run_agent(message: str, user_id: str) -> tuple[str, Optional[dict[str,
                 HumanMessage(content=full_message)
             ]
         })
+        t_invoke_done = time.monotonic()
 
         reply = "I was unable to generate a response. Please try again."
         # get last AI message
@@ -434,6 +442,25 @@ async def run_agent(message: str, user_id: str) -> tuple[str, Optional[dict[str,
             card = await get_hr_card_data(user_id)
         elif any(k in msg_lower for k in ["steps", "walked", "walking", "step count"]):
             card = await get_steps_card_data(user_id)
+        t_card_done = time.monotonic()
+
+        # TEMP DEBUG — remove once the /chat latency source is confirmed.
+        # Breaks down where the total request time is actually going:
+        #  - "agent setup": only non-zero on the very first /chat call in this
+        #    container's lifetime (LLM client + tool schema binding); cached
+        #    after that, so this should read ~0.00s on every subsequent call.
+        #  - "agent.ainvoke (LLM tool-routing + reasoning)": the actual round
+        #    trip(s) to Mistral — deciding which tool(s) to call, waiting on
+        #    tool results, then generating the final reply. This is the one
+        #    to watch; if this number matches the overall slow request time,
+        #    the bottleneck is the LLM call itself, not our code.
+        #  - "card builder": should be near-instant (simple indexed DB reads).
+        print(
+            f"[TIMING] agent setup: {t_agent_ready - t_start:.2f}s | "
+            f"agent.ainvoke (LLM tool-routing + reasoning): {t_invoke_done - t_agent_ready:.2f}s | "
+            f"card builder: {t_card_done - t_invoke_done:.2f}s | "
+            f"TOTAL: {t_card_done - t_start:.2f}s"
+        )
 
         return reply, card
     except Exception as e:
