@@ -1,3 +1,4 @@
+import asyncio
 from langchain_mistralai import ChatMistralAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
@@ -63,22 +64,40 @@ No real-time heart rate reading is available right now.
 - This is general health information, not medical advice.
 """
 
-def create_medxai_agent():
-    llm = ChatMistralAI(
-        api_key=os.getenv("MISTRAL_API_KEY"),
-        model="mistral-large-latest",
-        temperature=0.1,
-    )
-    tools = [
-        check_emergency,
-        get_patient_data,
-        search_medical_knowledge,
-        analyze_symptoms
-    ]
-    agent = create_react_agent(llm, tools)
-    return agent
+# Cached at module level instead of recreated on every /chat request — building
+# a fresh ChatMistralAI client + react-agent graph per call was wasted work on
+# every single request for no benefit, since none of it depends on per-request
+# state (message/user_id are only passed in at invoke time, not construction time).
+_AGENT = None
+
+
+def get_medxai_agent():
+    global _AGENT
+    if _AGENT is None:
+        llm = ChatMistralAI(
+            api_key=os.getenv("MISTRAL_API_KEY"),
+            model="mistral-large-latest",
+            temperature=0.1,
+        )
+        tools = [
+            check_emergency,
+            get_patient_data,
+            search_medical_knowledge,
+            analyze_symptoms
+        ]
+        _AGENT = create_react_agent(llm, tools)
+    return _AGENT
+
 
 # ── Card builders for each vital ────────────────────────────────────────────
+#
+# Every supabase.table(...).execute() call below is synchronous/blocking —
+# the Supabase Python client has no native async mode. Run inside FastAPI's
+# single-threaded event loop directly, a blocking DB call here freezes the
+# *entire server* for every other concurrent request (insights, chat, history,
+# everyone) until it returns — not just this one. asyncio.to_thread() runs the
+# blocking call on a background thread instead, so the event loop stays free
+# to serve other requests while this one waits on the DB.
 
 _WEEKDAY_ABBR = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
@@ -98,12 +117,15 @@ async def get_sleep_card_data(user_id: str) -> Optional[dict[str, Any]]:
                 }
             }
 
-        r = supabase.table("user_sleep")\
-            .select("*")\
-            .eq("user_id", user_id)\
-            .order("date", desc=True)\
-            .limit(1)\
-            .execute()
+        def _query():
+            return supabase.table("user_sleep")\
+                .select("*")\
+                .eq("user_id", user_id)\
+                .order("date", desc=True)\
+                .limit(1)\
+                .execute()
+
+        r = await asyncio.to_thread(_query)
 
         if r.data:
             row = r.data[0]
@@ -156,9 +178,14 @@ async def get_hr_card_data(user_id: str) -> Optional[dict[str, Any]]:
         return demo
     try:
         now = dt.utcnow()
-        rows = supabase.table("user_hr").select("*").eq("user_id", user_id)\
-            .gte("date", _fmt_date(now - timedelta(days=6)))\
-            .lte("date", _fmt_date(now)).order("date", desc=False).execute().data or []
+
+        def _query():
+            return supabase.table("user_hr").select("*").eq("user_id", user_id)\
+                .gte("date", _fmt_date(now - timedelta(days=6)))\
+                .lte("date", _fmt_date(now)).order("date", desc=False).execute()
+
+        result = await asyncio.to_thread(_query)
+        rows = result.data or []
         if not rows:
             return demo
         by_date = {r["date"]: r for r in rows}
@@ -199,9 +226,14 @@ async def get_spo2_card_data(user_id: str) -> Optional[dict[str, Any]]:
         return demo
     try:
         now = dt.utcnow()
-        rows = supabase.table("user_spo2").select("*").eq("user_id", user_id)\
-            .gte("date", _fmt_date(now - timedelta(days=6)))\
-            .lte("date", _fmt_date(now)).order("date", desc=False).execute().data or []
+
+        def _query():
+            return supabase.table("user_spo2").select("*").eq("user_id", user_id)\
+                .gte("date", _fmt_date(now - timedelta(days=6)))\
+                .lte("date", _fmt_date(now)).order("date", desc=False).execute()
+
+        result = await asyncio.to_thread(_query)
+        rows = result.data or []
         if not rows:
             return demo
         by_date = {r["date"]: r for r in rows}
@@ -242,9 +274,14 @@ async def get_hrv_card_data(user_id: str) -> Optional[dict[str, Any]]:
         return demo
     try:
         now = dt.utcnow()
-        rows = supabase.table("user_hrv").select("*").eq("user_id", user_id)\
-            .gte("date", _fmt_date(now - timedelta(days=6)))\
-            .lte("date", _fmt_date(now)).order("date", desc=False).execute().data or []
+
+        def _query():
+            return supabase.table("user_hrv").select("*").eq("user_id", user_id)\
+                .gte("date", _fmt_date(now - timedelta(days=6)))\
+                .lte("date", _fmt_date(now)).order("date", desc=False).execute()
+
+        result = await asyncio.to_thread(_query)
+        rows = result.data or []
         if not rows:
             return demo
         by_date = {r["date"]: r for r in rows}
@@ -286,9 +323,14 @@ async def get_bp_card_data(user_id: str) -> Optional[dict[str, Any]]:
         return demo
     try:
         now = dt.utcnow()
-        rows = supabase.table("user_bp").select("*").eq("user_id", user_id)\
-            .gte("measured_at", (now - timedelta(days=6)).isoformat())\
-            .order("measured_at", desc=False).limit(7).execute().data or []
+
+        def _query():
+            return supabase.table("user_bp").select("*").eq("user_id", user_id)\
+                .gte("measured_at", (now - timedelta(days=6)).isoformat())\
+                .order("measured_at", desc=False).limit(7).execute()
+
+        result = await asyncio.to_thread(_query)
+        rows = result.data or []
         if not rows:
             return demo
         sbp_values = [int(r.get("systolic") or 0) for r in rows]
@@ -329,9 +371,14 @@ async def get_steps_card_data(user_id: str) -> Optional[dict[str, Any]]:
         return demo
     try:
         now = dt.utcnow()
-        rows = supabase.table("user_steps").select("*").eq("user_id", user_id)\
-            .gte("date", _fmt_date(now - timedelta(days=6)))\
-            .lte("date", _fmt_date(now)).order("date", desc=False).execute().data or []
+
+        def _query():
+            return supabase.table("user_steps").select("*").eq("user_id", user_id)\
+                .gte("date", _fmt_date(now - timedelta(days=6)))\
+                .lte("date", _fmt_date(now)).order("date", desc=False).execute()
+
+        result = await asyncio.to_thread(_query)
+        rows = result.data or []
         if not rows:
             return demo
         by_date = {r["date"]: r for r in rows}
@@ -357,7 +404,7 @@ async def get_steps_card_data(user_id: str) -> Optional[dict[str, Any]]:
 
 async def run_agent(message: str, user_id: str) -> tuple[str, Optional[dict[str, Any]]]:
     try:
-        agent = create_medxai_agent()
+        agent = get_medxai_agent()
         full_message = f"{message}\n\n[user_id: {user_id}]"
         result = await agent.ainvoke({
             "messages": [

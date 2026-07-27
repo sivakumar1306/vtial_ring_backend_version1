@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -33,18 +34,31 @@ async def chat(request: ChatRequest):
         conversation_id = request.conversation_id
         try:
             if request.user_id != "anonymous":
+                # Each of these is a blocking supabase.execute() call, run
+                # directly inside this async route — exactly like the
+                # /insights endpoint before its fix, this froze FastAPI's
+                # entire event loop (and every other concurrent user's
+                # request) for the duration of each insert. Wrapping in
+                # asyncio.to_thread moves them to a background thread so the
+                # event loop stays free.
                 if not conversation_id:
-                    conv = supabase.table("conversations").insert({
-                        "user_id": request.user_id,
-                        "title": request.message[:50]
-                    }).execute()
+                    def _insert_conversation():
+                        return supabase.table("conversations").insert({
+                            "user_id": request.user_id,
+                            "title": request.message[:50]
+                        }).execute()
+
+                    conv = await asyncio.to_thread(_insert_conversation)
                     conversation_id = conv.data[0]["id"]
 
-                supabase.table("messages").insert({
-                    "conversation_id": conversation_id,
-                    "role": "user",
-                    "content": request.message
-                }).execute()
+                def _insert_user_message():
+                    return supabase.table("messages").insert({
+                        "conversation_id": conversation_id,
+                        "role": "user",
+                        "content": request.message
+                    }).execute()
+
+                await asyncio.to_thread(_insert_user_message)
 
                 assistant_msg = {
                     "conversation_id": conversation_id,
@@ -54,7 +68,10 @@ async def chat(request: ChatRequest):
                 if card:
                     assistant_msg["card"] = card
 
-                supabase.table("messages").insert(assistant_msg).execute()
+                def _insert_assistant_message():
+                    return supabase.table("messages").insert(assistant_msg).execute()
+
+                await asyncio.to_thread(_insert_assistant_message)
         except Exception as e:
             print(f"[MedXAI] History save failed: {e}")
 

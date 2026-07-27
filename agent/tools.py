@@ -32,6 +32,16 @@ def search_medical_knowledge(query: str) -> str:
     except Exception as e:
         return f"Medical knowledge search failed: {str(e)}"
 
+# Note on this file's blocking supabase.table(...).execute() calls:
+# get_patient_data is a synchronous @tool. When the agent is invoked via
+# agent.ainvoke() (see graph.py's run_agent), LangChain automatically runs
+# sync tool functions in a background thread pool rather than on the main
+# event loop — so these blocking DB calls do NOT freeze other concurrent
+# FastAPI requests the way the un-wrapped calls in health.py's /insights
+# route previously did (those were called directly inside an async route
+# handler, with nothing offloading them to a thread). No asyncio wrapping is
+# needed here; left as plain synchronous Supabase calls, matching how @tool
+# functions are meant to be written.
 @tool
 def get_patient_data(user_id: str) -> str:
     """Get the patient's health profile and recent smart ring biometric data. Input should be the user's UUID string."""

@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import APIRouter
 from datetime import datetime, timedelta, timezone
 import json
@@ -11,21 +12,26 @@ router = APIRouter()
 @router.get("/health-data/{user_id}")
 async def get_health_data(user_id: str):
     try:
-        # latest reading
-        latest = supabase.table("ring_data")\
-            .select("*")\
-            .eq("user_id", user_id)\
-            .order("recorded_at", desc=True)\
-            .limit(1)\
-            .execute()
+        def _fetch():
+            latest = supabase.table("ring_data")\
+                .select("*")\
+                .eq("user_id", user_id)\
+                .order("recorded_at", desc=True)\
+                .limit(1)\
+                .execute()
 
-        # last 7 days for weekly avg
-        weekly = supabase.table("ring_data")\
-            .select("*")\
-            .eq("user_id", user_id)\
-            .order("recorded_at", desc=True)\
-            .limit(7)\
-            .execute()
+            weekly = supabase.table("ring_data")\
+                .select("*")\
+                .eq("user_id", user_id)\
+                .order("recorded_at", desc=True)\
+                .limit(7)\
+                .execute()
+            return latest, weekly
+
+        # Both blocking Supabase calls run off the event loop together — a
+        # blocking call here previously froze the whole server for every
+        # other concurrent request (insights, chat, history), not just this one.
+        latest, weekly = await asyncio.to_thread(_fetch)
 
         weekly_avg = None
         if weekly.data:
@@ -55,17 +61,31 @@ async def get_health_data(user_id: str):
 # (never given raw DB access, never allowed to invent a number) — with a
 # deterministic template fallback if the LLM call fails or returns something
 # unparseable, so this endpoint is never blank or broken.
+#
+# IMPORTANT: every supabase.table(...).execute() call and every LLM .invoke()
+# call is synchronous/blocking. Run directly inside this async route, any one
+# of them freezes FastAPI's entire single-threaded event loop — meaning every
+# OTHER concurrent request (other users' /insights, /chat, /history calls)
+# queues up and stalls until this one finishes, even though they have nothing
+# to do with each other. That was the actual cause of the multi-minute
+# request pileups seen in Railway's logs. Wrapping each blocking call in
+# asyncio.to_thread() runs it on a background thread instead, freeing the
+# event loop to keep serving other requests while this one waits on I/O.
 
 RANGE_DAYS = {"7D": 7, "30D": 30, "90D": 90}
 
-def _rows_in_range(table: str, user_id: str, days: int, date_col: str):
+async def _rows_in_range(table: str, user_id: str, days: int, date_col: str):
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
-    r = supabase.table(table)\
-        .select("*")\
-        .eq("user_id", user_id)\
-        .gte(date_col, cutoff)\
-        .order(date_col, desc=False)\
-        .execute()
+
+    def _query():
+        return supabase.table(table)\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .gte(date_col, cutoff)\
+            .order(date_col, desc=False)\
+            .execute()
+
+    r = await asyncio.to_thread(_query)
     return r.data or []
 
 def _split_avg(rows, field):
@@ -80,14 +100,18 @@ def _split_avg(rows, field):
         return None, None
     return sum(first_half) / len(first_half), sum(second_half) / len(second_half)
 
-def _bp_rows_in_range(user_id: str, days: int):
+async def _bp_rows_in_range(user_id: str, days: int):
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    r = supabase.table("user_bp")\
-        .select("*")\
-        .eq("user_id", user_id)\
-        .gte("measured_at", cutoff)\
-        .order("measured_at", desc=False)\
-        .execute()
+
+    def _query():
+        return supabase.table("user_bp")\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .gte("measured_at", cutoff)\
+            .order("measured_at", desc=False)\
+            .execute()
+
+    r = await asyncio.to_thread(_query)
     return r.data or []
 
 
@@ -152,7 +176,7 @@ def _template_headline(changes: list, alarming_changes: list) -> dict:
     return {"headline_parts": headline_parts, "subtext": subtext}
 
 
-def _call_llm_for_headline(changes: list, alarming_changes: list) -> dict:
+async def _call_llm_for_headline(changes: list, alarming_changes: list) -> dict:
     payload = json.dumps({
         "changes": [
             {
@@ -170,7 +194,11 @@ def _call_llm_for_headline(changes: list, alarming_changes: list) -> dict:
         model="mistral-large-latest",
         temperature=0.2,
     )
-    result = llm.invoke([
+    # await .ainvoke(), not the blocking .invoke() — this single call was the
+    # single biggest contributor to the multi-minute request pileups: while
+    # waiting on Mistral's response, .invoke() froze the entire event loop,
+    # blocking every other concurrent user's request regardless of endpoint.
+    result = await llm.ainvoke([
         SystemMessage(content=INSIGHTS_SYSTEM_PROMPT),
         HumanMessage(content=payload),
     ])
@@ -192,7 +220,7 @@ async def get_insights(user_id: str, range: str = "30D"):
         changes = []  # each: dict(key,title,delta_label,subtitle,alarming,improving)
 
         # --- Sleep (user_sleep: date, total_duration [minutes], sleep_score) ---
-        sleep_rows = _rows_in_range("user_sleep", user_id, days, "date")
+        sleep_rows = await _rows_in_range("user_sleep", user_id, days, "date")
         first, second = _split_avg(sleep_rows, "total_duration")
         if first is not None:
             delta_min = round(second - first)
@@ -208,7 +236,7 @@ async def get_insights(user_id: str, range: str = "30D"):
                 })
 
         # --- HRV (user_hrv: date, avg_hrv ms) — lower HRV trend is the concern ---
-        hrv_rows = _rows_in_range("user_hrv", user_id, days, "date")
+        hrv_rows = await _rows_in_range("user_hrv", user_id, days, "date")
         first, second = _split_avg(hrv_rows, "avg_hrv")
         if first is not None:
             delta_hrv = round(second - first)
@@ -226,7 +254,7 @@ async def get_insights(user_id: str, range: str = "30D"):
         # --- Resting heart rate (user_hr: date, avg_hr) ---
         # "alarming" is based on the CURRENT resting HR value crossing a
         # clinically meaningful threshold — 100 bpm resting = tachycardia range.
-        hr_rows = _rows_in_range("user_hr", user_id, days, "date")
+        hr_rows = await _rows_in_range("user_hr", user_id, days, "date")
         first, second = _split_avg(hr_rows, "avg_hr")
         if first is not None:
             delta_hr = round(second - first)
@@ -251,7 +279,7 @@ async def get_insights(user_id: str, range: str = "30D"):
         # Same principle as heart rate: "alarming" reflects the CURRENT
         # reading crossing a hypertensive threshold, not the size of the
         # trend/delta by itself.
-        bp_rows = _bp_rows_in_range(user_id, days)
+        bp_rows = await _bp_rows_in_range(user_id, days)
         first_s, second_s = _split_avg(bp_rows, "systolic")
         if first_s is not None:
             delta_s = round(second_s - first_s)
@@ -275,7 +303,7 @@ async def get_insights(user_id: str, range: str = "30D"):
                 })
 
         # --- SpO2 (user_spo2: date, avg_spo2) — alarming if genuinely low ---
-        spo2_rows = _rows_in_range("user_spo2", user_id, days, "date")
+        spo2_rows = await _rows_in_range("user_spo2", user_id, days, "date")
         if spo2_rows:
             latest_spo2 = spo2_rows[-1].get("avg_spo2")
             if latest_spo2 is not None and latest_spo2 < 94:
@@ -289,7 +317,7 @@ async def get_insights(user_id: str, range: str = "30D"):
                 })
 
         # --- Steps (user_steps: date, steps) ---
-        steps_rows = _rows_in_range("user_steps", user_id, days, "date")
+        steps_rows = await _rows_in_range("user_steps", user_id, days, "date")
         first, second = _split_avg(steps_rows, "steps")
         if first and first > 0:
             pct = round(((second - first) / first) * 100)
@@ -316,7 +344,7 @@ async def get_insights(user_id: str, range: str = "30D"):
         # --- Headline + subtext: LLM-generated, grounded in `changes`, with
         # a deterministic template fallback if the LLM call fails. ---
         try:
-            headline_data = _call_llm_for_headline(changes, alarming_changes)
+            headline_data = await _call_llm_for_headline(changes, alarming_changes)
         except Exception as e:
             print(f"[get_insights] LLM headline generation failed, using template fallback: {e}")
             headline_data = _template_headline(changes, alarming_changes)
