@@ -16,13 +16,24 @@ def _to_ist(iso_str) -> str:
     except Exception:
         return str(iso_str)
 
+# IMPORTANT: this must stay `async def`, not a sync function wrapped in
+# asyncio.run(). rag.py's retrieve_context_with_expansion() fires off a
+# background asyncio.create_task() to expand the knowledge base without
+# blocking the user's reply. asyncio.run() creates a brand-new event loop,
+# runs the coroutine to completion, and immediately DESTROYS that loop the
+# instant it returns — which cancels any task scheduled on it that hasn't
+# finished yet. That would silently kill the background expansion task
+# before it ever did any work, completely defeating that fix (and likely
+# print "Task was destroyed but it is pending!" warnings in the logs).
+# By making this an async tool, LangChain's agent.ainvoke() awaits it
+# directly on the real, persistent FastAPI/uvicorn event loop instead — so
+# the background task actually survives and completes after this call returns.
 @tool
-def search_medical_knowledge(query: str) -> str:
+async def search_medical_knowledge(query: str) -> str:
     """Search the medical knowledge base for information about symptoms, conditions, treatments, and medications. Automatically expands knowledge base if needed."""
     try:
-        import asyncio
         from services.rag import retrieve_context_with_expansion
-        results = asyncio.run(retrieve_context_with_expansion(query, match_count=3))
+        results = await retrieve_context_with_expansion(query, match_count=3)
         if not results:
             return "No relevant medical information found."
         output = ""
@@ -32,7 +43,7 @@ def search_medical_knowledge(query: str) -> str:
     except Exception as e:
         return f"Medical knowledge search failed: {str(e)}"
 
-# Note on this file's blocking supabase.table(...).execute() calls:
+# Note on this file's blocking supabase.table(...).execute() calls (below):
 # get_patient_data is a synchronous @tool. When the agent is invoked via
 # agent.ainvoke() (see graph.py's run_agent), LangChain automatically runs
 # sync tool functions in a background thread pool rather than on the main
@@ -41,7 +52,8 @@ def search_medical_knowledge(query: str) -> str:
 # route previously did (those were called directly inside an async route
 # handler, with nothing offloading them to a thread). No asyncio wrapping is
 # needed here; left as plain synchronous Supabase calls, matching how @tool
-# functions are meant to be written.
+# functions are meant to be written. (search_medical_knowledge above is the
+# one exception that needed to be async, for the reason explained there.)
 @tool
 def get_patient_data(user_id: str) -> str:
     """Get the patient's health profile and recent smart ring biometric data. Input should be the user's UUID string."""
