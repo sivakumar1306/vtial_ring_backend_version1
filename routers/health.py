@@ -74,6 +74,20 @@ async def get_health_data(user_id: str):
 
 RANGE_DAYS = {"7D": 7, "30D": 30, "90D": 90}
 
+
+def _format_hm(total_minutes: int) -> str:
+    """Format a minute count as a compact hours/minutes string, e.g. 150 -> '2h 30m',
+    60 -> '1h', 45 -> '45m'. Used so sleep deltas read in hours instead of raw minutes."""
+    total_minutes = abs(total_minutes)
+    h = total_minutes // 60
+    m = total_minutes % 60
+    if h > 0 and m > 0:
+        return f"{h}h {m}m"
+    if h > 0:
+        return f"{h}h"
+    return f"{m}m"
+
+
 async def _rows_in_range(table: str, user_id: str, days: int, date_col: str):
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
 
@@ -229,8 +243,8 @@ async def get_insights(user_id: str, range: str = "30D"):
                 changes.append({
                     "key": "sleep",
                     "title": "Sleep",
-                    "delta_label": f"{'+' if delta_min >= 0 else ''}{delta_min} min",
-                    "subtitle": f"{abs(delta_min)} minutes {'more' if improving else 'less'} sleep on average",
+                    "delta_label": f"{'+' if delta_min >= 0 else '-'}{_format_hm(delta_min)}",
+                    "subtitle": f"{_format_hm(delta_min)} {'more' if improving else 'less'} sleep on average",
                     "alarming": (not improving) and abs(delta_min) >= 30,
                     "improving": improving,
                 })
