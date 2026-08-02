@@ -157,6 +157,18 @@ PATIENT PROFILE:
             b = bp.data[0]
             context += f"\nLATEST BLOOD PRESSURE: {b.get('systolic')}/{b.get('diastolic')} (measured {_to_ist(b.get('measured_at'))})\n"
 
+        temp = supabase.table("user_temp")\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .order("measured_at", desc=True)\
+            .limit(1)\
+            .execute()
+        if temp.data:
+            t = temp.data[0]
+            context += f"\nLATEST TEMPERATURE: {t.get('value_c')} °C (measured {_to_ist(t.get('measured_at'))})\n"
+        else:
+            context += "\nLATEST TEMPERATURE: NO reading found in database for this user.\n"
+
         result = context.strip() if context else "No patient data found."
         print(f"[get_patient_data] user_id={user_id}\n---TOOL OUTPUT SENT TO LLM---\n{result}\n---END TOOL OUTPUT---")
         return result

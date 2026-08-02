@@ -76,11 +76,17 @@ RANGE_DAYS = {"7D": 7, "30D": 30, "90D": 90}
 
 
 def _format_hm(total_minutes: int) -> str:
-    """Format a minute count as a compact hours/minutes string, e.g. 150 -> '2h 30m',
-    60 -> '1h', 45 -> '45m'. Used so sleep deltas read in hours instead of raw minutes."""
+    """Format a minute count as a compact days/hours/minutes string, e.g. 150 -> '2h 30m',
+    60 -> '1h', 45 -> '45m', 1500 -> '1d 1h'. Used so sleep deltas read in
+    human units instead of raw minutes or overflowing hour counts."""
     total_minutes = abs(total_minutes)
-    h = total_minutes // 60
+    d = total_minutes // 1440
+    h = (total_minutes % 1440) // 60
     m = total_minutes % 60
+    if d > 0 and h > 0:
+        return f"{d}d {h}h"
+    if d > 0:
+        return f"{d}d"
     if h > 0 and m > 0:
         return f"{h}h {m}m"
     if h > 0:

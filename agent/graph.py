@@ -51,7 +51,7 @@ Example format:
 No signs of fever based on current data.
 - Current heart rate: 90 bpm (within normal range)
 - SpO2: 97% (normal oxygen saturation)
-- No temperature reading available
+- Temperature: [value] °C (interpretation, e.g. normal/elevated)
 - Monitor for chills, body aches, or fatigue
 - Consult a doctor if fever develops or persists
 - This is general health information, not medical advice.
