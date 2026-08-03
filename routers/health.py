@@ -135,6 +135,23 @@ async def _bp_rows_in_range(user_id: str, days: int):
     return r.data or []
 
 
+async def _measured_at_rows_in_range(table: str, user_id: str, days: int):
+    """Like _rows_in_range but for tables keyed on measured_at instead of date
+    (user_stress, user_temp) — mirrors _bp_rows_in_range's pattern."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    def _query():
+        return supabase.table(table)\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .gte("measured_at", cutoff)\
+            .order("measured_at", desc=False)\
+            .execute()
+
+    r = await asyncio.to_thread(_query)
+    return r.data or []
+
+
 # ── LLM headline/subtext generation ─────────────────────────────────────────
 
 INSIGHTS_SYSTEM_PROMPT = """You are writing a short, precise health insight headline and subtext for a smart ring app's home screen.
@@ -233,16 +250,66 @@ async def _call_llm_for_headline(changes: list, alarming_changes: list) -> dict:
     return parsed
 
 
+STEADY_STATUS_SYSTEM_PROMPT = """You are writing a short, warm health status headline and subtext for a smart ring app.
+
+Nothing in the user's data changed significantly this period — all their vitals are steady. You will be given a JSON list of their current readings (metric name and value, in plain text). Write an encouraging, natural-sounding headline and subtext that reflects these readings.
+
+Respond with STRICT JSON only — no markdown, no code fences, no commentary. Match this exact shape:
+
+{
+  "headline_parts": [
+    {"text": "Your vitals look ", "highlight": false},
+    {"text": "steady", "highlight": true}
+  ],
+  "subtext": "One short, natural sentence mentioning the readings given."
+}
+
+Rules:
+- Never invent, estimate, or add any number or metric not present in the given list.
+- Keep the headline under ~10 words, with exactly one highlighted clause (usually the encouraging word itself, e.g. "steady", "on track", "in good shape").
+- The subtext should read like a natural sentence weaving in the given readings, not a bare comma-separated list.
+- Tone: warm, brief, reassuring — not clinical."""
+
+
+async def _call_llm_for_steady_status(current_status_parts: list) -> dict:
+    payload = json.dumps({"current_readings": current_status_parts}, indent=2)
+
+    llm = ChatMistralAI(
+        api_key=os.getenv("MISTRAL_API_KEY"),
+        model="mistral-large-latest",
+        temperature=0.2,
+    )
+    result = await llm.ainvoke([
+        SystemMessage(content=STEADY_STATUS_SYSTEM_PROMPT),
+        HumanMessage(content=payload),
+    ])
+    raw = result.content.strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError("No JSON object found in LLM response")
+    parsed = json.loads(raw[start:end + 1])
+    if "headline_parts" not in parsed or "subtext" not in parsed:
+        raise ValueError("Malformed steady-status JSON from LLM")
+    return parsed
+
+
 @router.get("/insights/{user_id}")
 async def get_insights(user_id: str, range: str = "30D"):
     days = RANGE_DAYS.get(range, 30)
     try:
         changes = []  # each: dict(key,title,delta_label,subtitle,alarming,improving)
+        # Collected regardless of whether a metric "changed" — used for the
+        # Tier 2 steady-vitals summary when nothing trended significantly.
+        current_status_parts = []
 
         # --- Sleep (user_sleep: date, total_duration [minutes], sleep_score) ---
         sleep_rows = await _rows_in_range("user_sleep", user_id, days, "date")
         valid_sleep_rows = [r for r in sleep_rows if (r.get("total_duration") or 0) > 0]
         first, second = _split_avg(valid_sleep_rows, "total_duration")
+        latest_sleep = valid_sleep_rows[-1].get("total_duration") if valid_sleep_rows else None
+        if latest_sleep:
+            current_status_parts.append(f"sleep {_format_hm(latest_sleep)}")
         if first is not None:
             delta_min = round(second - first)
             if abs(delta_min) >= 15:
@@ -260,6 +327,9 @@ async def get_insights(user_id: str, range: str = "30D"):
         hrv_rows = await _rows_in_range("user_hrv", user_id, days, "date")
         valid_hrv_rows = [r for r in hrv_rows if (r.get("avg_hrv") or 0) > 0]
         first, second = _split_avg(valid_hrv_rows, "avg_hrv")
+        latest_hrv = valid_hrv_rows[-1].get("avg_hrv") if valid_hrv_rows else None
+        if latest_hrv:
+            current_status_parts.append(f"HRV {round(latest_hrv)} ms")
         if first is not None:
             delta_hrv = round(second - first)
             if abs(delta_hrv) >= 4:
@@ -274,17 +344,17 @@ async def get_insights(user_id: str, range: str = "30D"):
                 })
 
         # --- Resting heart rate (user_hr: date, avg_hr) ---
-        # "alarming" is based on the CURRENT resting HR value crossing a
-        # clinically meaningful threshold — 100 bpm resting = tachycardia range.
         hr_rows = await _rows_in_range("user_hr", user_id, days, "date")
         valid_hr_rows = [r for r in hr_rows if (r.get("avg_hr") or 0) > 0]
         first, second = _split_avg(valid_hr_rows, "avg_hr")
+        latest_avg_hr = valid_hr_rows[-1].get("avg_hr") if valid_hr_rows else None
+        if latest_avg_hr:
+            current_status_parts.append(f"heart rate {round(latest_avg_hr)} bpm")
         if first is not None:
             delta_hr = round(second - first)
-            latest_avg_hr = valid_hr_rows[-1].get("avg_hr") if valid_hr_rows else None
             alarming = latest_avg_hr is not None and latest_avg_hr >= 100
             if abs(delta_hr) >= 5 or alarming:
-                improving = delta_hr <= 0  # lower resting HR trend = improving
+                improving = delta_hr <= 0
                 changes.append({
                     "key": "heart_rate",
                     "title": "Heart rate",
@@ -299,15 +369,14 @@ async def get_insights(user_id: str, range: str = "30D"):
                 })
 
         # --- Blood pressure (user_bp: measured_at, systolic, diastolic) ---
-        # Same principle as heart rate: "alarming" reflects the CURRENT
-        # reading crossing a hypertensive threshold, not the size of the
-        # trend/delta by itself.
         bp_rows = await _bp_rows_in_range(user_id, days)
         first_s, second_s = _split_avg(bp_rows, "systolic")
+        latest_systolic = bp_rows[-1].get("systolic") if bp_rows else None
+        latest_diastolic = bp_rows[-1].get("diastolic") if bp_rows else None
+        if latest_systolic and latest_diastolic:
+            current_status_parts.append(f"blood pressure {latest_systolic}/{latest_diastolic}")
         if first_s is not None:
             delta_s = round(second_s - first_s)
-            latest_systolic = bp_rows[-1].get("systolic") if bp_rows else None
-            latest_diastolic = bp_rows[-1].get("diastolic") if bp_rows else None
             hypertensive = (latest_systolic and latest_systolic >= 130) or (latest_diastolic and latest_diastolic >= 80)
             if abs(delta_s) >= 5 or hypertensive:
                 improving = delta_s <= 0
@@ -327,22 +396,26 @@ async def get_insights(user_id: str, range: str = "30D"):
 
         # --- SpO2 (user_spo2: date, avg_spo2) — alarming if genuinely low ---
         spo2_rows = await _rows_in_range("user_spo2", user_id, days, "date")
-        if spo2_rows:
-            latest_spo2 = spo2_rows[-1].get("avg_spo2")
-            if latest_spo2 is not None and latest_spo2 < 94:
-                changes.append({
-                    "key": "spo2",
-                    "title": "Blood oxygen",
-                    "delta_label": f"{round(latest_spo2)}%",
-                    "subtitle": f"Recent SpO2 reading of {round(latest_spo2)}% is below the normal range",
-                    "alarming": True,
-                    "improving": False,
-                })
+        latest_spo2 = spo2_rows[-1].get("avg_spo2") if spo2_rows else None
+        if latest_spo2:
+            current_status_parts.append(f"SpO2 {round(latest_spo2)}%")
+        if latest_spo2 is not None and latest_spo2 < 94:
+            changes.append({
+                "key": "spo2",
+                "title": "Blood oxygen",
+                "delta_label": f"{round(latest_spo2)}%",
+                "subtitle": f"Recent SpO2 reading of {round(latest_spo2)}% is below the normal range",
+                "alarming": True,
+                "improving": False,
+            })
 
         # --- Steps (user_steps: date, steps) ---
         steps_rows = await _rows_in_range("user_steps", user_id, days, "date")
         valid_steps_rows = [r for r in steps_rows if (r.get("steps") or 0) > 0]
         first, second = _split_avg(valid_steps_rows, "steps")
+        latest_steps = valid_steps_rows[-1].get("steps") if valid_steps_rows else None
+        if latest_steps:
+            current_status_parts.append(f"{latest_steps:,} steps")
         if first and first > 0:
             pct = round(((second - first) / first) * 100)
             if abs(pct) >= 20:
@@ -356,21 +429,85 @@ async def get_insights(user_id: str, range: str = "30D"):
                     "improving": improving,
                 })
 
-        # If anything is alarming, only alarming card(s) are surfaced — matches
-        # the product requirement that an alarming metric should stand alone
-        # rather than compete for attention with routine trend cards.
+        # --- Stress (user_stress: measured_at, stress_value, label) ---
+        # Lower stress trend = improving, mirrors the HRV pattern.
+        stress_rows = await _measured_at_rows_in_range("user_stress", user_id, days)
+        first, second = _split_avg(stress_rows, "stress_value")
+        latest_stress_row = stress_rows[-1] if stress_rows else None
+        latest_stress_val = latest_stress_row.get("stress_value") if latest_stress_row else None
+        latest_stress_label = latest_stress_row.get("label") if latest_stress_row else None
+        if latest_stress_val is not None:
+            label_suffix = f" ({latest_stress_label.lower()})" if latest_stress_label else ""
+            current_status_parts.append(f"stress {latest_stress_val}{label_suffix}")
+        if first is not None:
+            delta_stress = round(second - first)
+            if abs(delta_stress) >= 8:
+                improving = delta_stress < 0
+                changes.append({
+                    "key": "stress",
+                    "title": "Stress",
+                    "delta_label": f"{'+' if delta_stress >= 0 else ''}{delta_stress}",
+                    "subtitle": (
+                        f"Stress trending {'up' if delta_stress > 0 else 'down'} across the period"
+                        if not (latest_stress_val is not None and latest_stress_val >= 80) else
+                        f"Recent stress reading of {latest_stress_val} is elevated"
+                    ),
+                    "alarming": latest_stress_val is not None and latest_stress_val >= 80,
+                    "improving": improving,
+                })
+
+        # --- Temperature (user_temp: measured_at, value_c) ---
+        # Alarming if the latest reading is outside a normal range, mirroring
+        # the SpO2 "latest value" style check rather than a trend delta.
+        temp_rows = await _measured_at_rows_in_range("user_temp", user_id, days)
+        latest_temp = temp_rows[-1].get("value_c") if temp_rows else None
+        if latest_temp:
+            current_status_parts.append(f"temperature {latest_temp:.1f}°C")
+        if latest_temp is not None and (latest_temp < 36.1 or latest_temp > 37.5):
+            changes.append({
+                "key": "temperature",
+                "title": "Temperature",
+                "delta_label": f"{latest_temp:.1f}°C",
+                "subtitle": (
+                    f"Recent temperature reading of {latest_temp:.1f}°C is elevated"
+                    if latest_temp > 37.5 else
+                    f"Recent temperature reading of {latest_temp:.1f}°C is below normal"
+                ),
+                "alarming": True,
+                "improving": False,
+            })
+
+        # If anything is alarming, only alarming card(s) are surfaced.
         alarming_changes = [c for c in changes if c["alarming"]]
         if alarming_changes:
             updates = alarming_changes
         else:
             updates = changes[:2]
 
-        # --- Headline + subtext: LLM-generated, grounded in `changes`, with
-        # a deterministic template fallback if the LLM call fails. ---
-        try:
-            headline_data = await _call_llm_for_headline(changes, alarming_changes)
-        except Exception as e:
-            print(f"[get_insights] LLM headline generation failed, using template fallback: {e}")
+        # --- Headline + subtext ---
+        if changes:
+            try:
+                headline_data = await _call_llm_for_headline(changes, alarming_changes)
+            except Exception as e:
+                print(f"[get_insights] LLM headline generation failed, using template fallback: {e}")
+                headline_data = _template_headline(changes, alarming_changes)
+        elif current_status_parts:
+            # Tier 2: nothing changed significantly, but real current readings
+            # exist — show an LLM-phrased steady-vitals status summary instead
+            # of a bare "not enough data" message, with a deterministic
+            # template fallback if the LLM call fails.
+            try:
+                headline_data = await _call_llm_for_steady_status(current_status_parts)
+            except Exception as e:
+                print(f"[get_insights] LLM steady-status generation failed, using template fallback: {e}")
+                headline_data = {
+                    "headline_parts": [
+                        {"text": "Your vitals look ", "highlight": False},
+                        {"text": "steady", "highlight": True},
+                    ],
+                    "subtext": f"Latest readings: {', '.join(current_status_parts)}.",
+                }
+        else:
             headline_data = _template_headline(changes, alarming_changes)
 
         return {
