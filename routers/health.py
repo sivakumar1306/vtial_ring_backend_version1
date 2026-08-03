@@ -241,7 +241,8 @@ async def get_insights(user_id: str, range: str = "30D"):
 
         # --- Sleep (user_sleep: date, total_duration [minutes], sleep_score) ---
         sleep_rows = await _rows_in_range("user_sleep", user_id, days, "date")
-        first, second = _split_avg(sleep_rows, "total_duration")
+        valid_sleep_rows = [r for r in sleep_rows if (r.get("total_duration") or 0) > 0]
+        first, second = _split_avg(valid_sleep_rows, "total_duration")
         if first is not None:
             delta_min = round(second - first)
             if abs(delta_min) >= 15:
@@ -257,7 +258,8 @@ async def get_insights(user_id: str, range: str = "30D"):
 
         # --- HRV (user_hrv: date, avg_hrv ms) — lower HRV trend is the concern ---
         hrv_rows = await _rows_in_range("user_hrv", user_id, days, "date")
-        first, second = _split_avg(hrv_rows, "avg_hrv")
+        valid_hrv_rows = [r for r in hrv_rows if (r.get("avg_hrv") or 0) > 0]
+        first, second = _split_avg(valid_hrv_rows, "avg_hrv")
         if first is not None:
             delta_hrv = round(second - first)
             if abs(delta_hrv) >= 4:
@@ -275,10 +277,11 @@ async def get_insights(user_id: str, range: str = "30D"):
         # "alarming" is based on the CURRENT resting HR value crossing a
         # clinically meaningful threshold — 100 bpm resting = tachycardia range.
         hr_rows = await _rows_in_range("user_hr", user_id, days, "date")
-        first, second = _split_avg(hr_rows, "avg_hr")
+        valid_hr_rows = [r for r in hr_rows if (r.get("avg_hr") or 0) > 0]
+        first, second = _split_avg(valid_hr_rows, "avg_hr")
         if first is not None:
             delta_hr = round(second - first)
-            latest_avg_hr = hr_rows[-1].get("avg_hr") if hr_rows else None
+            latest_avg_hr = valid_hr_rows[-1].get("avg_hr") if valid_hr_rows else None
             alarming = latest_avg_hr is not None and latest_avg_hr >= 100
             if abs(delta_hr) >= 5 or alarming:
                 improving = delta_hr <= 0  # lower resting HR trend = improving
@@ -338,7 +341,8 @@ async def get_insights(user_id: str, range: str = "30D"):
 
         # --- Steps (user_steps: date, steps) ---
         steps_rows = await _rows_in_range("user_steps", user_id, days, "date")
-        first, second = _split_avg(steps_rows, "steps")
+        valid_steps_rows = [r for r in steps_rows if (r.get("steps") or 0) > 0]
+        first, second = _split_avg(valid_steps_rows, "steps")
         if first and first > 0:
             pct = round(((second - first) / first) * 100)
             if abs(pct) >= 20:
