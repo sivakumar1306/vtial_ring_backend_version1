@@ -42,6 +42,9 @@ RESPONSE FORMAT — STRICTLY FOLLOW THIS:
 - Use precise clinical/medical terminology (e.g. "tachycardia" instead of "fast heart rate", "hyperglycemia" instead of "high blood sugar"). Add a brief plain-language clarification in parentheses the first time you use an uncommon term.
 - Do NOT use any markdown formatting — no asterisks, no bold, no headers, no numbering. Plain text only.
 - Start with one short summary line (no label, no prefix — just the sentence).
+- Give AT MOST 4 bullet points total (not counting the mandatory disclaimer bullet). If more metrics are relevant than that, group/merge related ones into a single bullet (e.g. combine HR+HRV+SpO2 into one "vitals are in normal range" bullet) rather than listing each one separately.
+- Do not list every historical day's data — summarize the trend across the days (e.g. "sleep score improved from 63 to 89 over the week") in one bullet instead of one bullet per day.
+- Every number stated must still come verbatim from tool output — summarizing must never introduce averages or values not present in the tool output.
 - Follow with bullet points using a plain hyphen "-" at the start of each line. Keep each bullet under 15 words.
 - Do not use section labels like "Summary:" or "Findings:" — just a summary sentence, then bullets.
 - Be empathetic in tone even while being concise.
@@ -49,9 +52,8 @@ RESPONSE FORMAT — STRICTLY FOLLOW THIS:
 
 Example format:
 No signs of fever based on current data.
-- Current heart rate: 90 bpm (within normal range)
-- SpO2: 97% (normal oxygen saturation)
-- Temperature: [value] °C (interpretation, e.g. normal/elevated)
+- Current vitals normal: HR 90 bpm, SpO2 97%
+- Temperature: 36.6 °C (afebrile)
 - Monitor for chills, body aches, or fatigue
 - Consult a doctor if fever develops or persists
 - This is general health information, not medical advice.
