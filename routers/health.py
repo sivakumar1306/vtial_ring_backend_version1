@@ -320,8 +320,15 @@ async def get_insights(user_id: str):
         # Tier 2 steady-vitals summary when nothing trended significantly.
         current_status_parts = []
 
-        # --- Sleep (user_sleep: date, total_duration [minutes], sleep_score) ---
+        # --- Sleep (user_sleep: date, total_duration, sleep_score) ---
         sleep_rows = await _rows_in_range("user_sleep", user_id, days, "date")
+        # total_duration is stored in seconds in the DB (confirmed via direct
+        # query) — the sleep card builder in graph.py already normalizes this,
+        # but this insights code was treating it as already-minutes, inflating
+        # every sleep delta ~60x (e.g. "5d 20h less sleep" instead of minutes).
+        for r in sleep_rows:
+            if r.get("total_duration"):
+                r["total_duration"] = r["total_duration"] // 60
         valid_sleep_rows = [r for r in sleep_rows if (r.get("total_duration") or 0) > 0]
         first, second = _split_avg(valid_sleep_rows, "total_duration")
         latest_sleep = valid_sleep_rows[-1].get("total_duration") if valid_sleep_rows else None
