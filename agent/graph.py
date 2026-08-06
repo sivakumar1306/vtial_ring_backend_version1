@@ -37,6 +37,9 @@ Important rules:
 - When asked for the "current" or "live" heart rate specifically, use ONLY the value labeled "CURRENT HEART RATE" in the tool output. Do NOT substitute a value from "HISTORICAL DAILY HEART RATE" (those are daily avg/min/max, not current). If that reading is marked [STALE], say clearly that it's not real-time and state its actual age/date — do not present it as "current" without that caveat. If the tool says no reading was found, say so plainly instead of guessing.
 - Do not fabricate field labels or stats (e.g. "resting average", "recent max") that are not literally present in the tool output.
 - Before sending your final reply, silently check every number you are about to state against the tool output. If a number cannot be found verbatim in the tool output, delete it and say the data is unavailable instead.
+- If you successfully retrieved a value from a tool and are about to state it, do NOT also say you "cannot retrieve" or "don't have access to" that data — these are contradictory. State the real value with its staleness caveat instead of denying access to it.
+- Only report on the metric(s) the user actually asked about. If they ask about blood pressure specifically, your reply must be about blood pressure only — do not mention heart rate, temperature, HRV, SpO2, sleep, or steps unless the user asked about them too or the tool output flags a genuine emergency requiring it.
+- If the user's question does not name a specific metric (e.g. "how am I doing", "how's my health"), you may give a brief multi-metric overview — but if they name one metric, stay scoped to that one.
 
 RESPONSE FORMAT — STRICTLY FOLLOW THIS:
 - Use precise clinical/medical terminology (e.g. "tachycardia" instead of "fast heart rate", "hyperglycemia" instead of "high blood sugar"). Add a brief plain-language clarification in parentheses the first time you use an uncommon term.
@@ -315,40 +318,60 @@ async def get_hrv_card_data(user_id: str) -> Optional[dict[str, Any]]:
         return demo
 
 async def get_bp_card_data(user_id: str) -> Optional[dict[str, Any]]:
-    demo = {
-        "type": "bp_trend",
-        "data": {
-            "sbp_avg": 118, "dbp_avg": 76,
-            "sbp_values": [115, 120, 118, 122, 117, 119, 118],
-            "dbp_values": [74, 78, 76, 80, 75, 77, 76],
-            "labels": _WEEKDAY_ABBR,
-        }
-    }
+    # No hardcoded/demo fallback for this card (unlike the others above) —
+    # blood pressure readings are sparse and irregular enough that a fake
+    # "118/76, 7 day trend" looked indistinguishable from real data and
+    # actively contradicted the chat reply when no real BP data existed.
+    # Returning None here means chat_screen.dart's `if (card != null)` check
+    # simply skips rendering the card — confirmed this is already handled
+    # correctly on the frontend, no card is safer than a fabricated one.
     if not user_id or user_id == "anonymous":
-        return demo
+        return None
     try:
         now = dt.utcnow()
 
         def _query():
             return supabase.table("user_bp").select("*").eq("user_id", user_id)\
                 .gte("measured_at", (now - timedelta(days=6)).isoformat())\
-                .order("measured_at", desc=False).limit(7).execute()
+                .order("measured_at", desc=False).execute()
 
         result = await asyncio.to_thread(_query)
         rows = result.data or []
         if not rows:
-            return demo
-        sbp_values = [int(r.get("systolic") or 0) for r in rows]
-        dbp_values = [int(r.get("diastolic") or 0) for r in rows]
-        labels = []
+            return None
+
+        # Multiple BP readings can land on the same calendar day (confirmed
+        # via direct query: users often take several readings within minutes
+        # of each other). Keep only the LATEST reading per day so a "7 day
+        # trend" actually spans 7 distinct calendar days instead of the last
+        # 7 raw rows, which could all fall within 1-2 days and repeat the
+        # same weekday label (e.g. "Sat, Sun, Sun, Sun, Sun, Sun, Sun").
+        # Mirrors the by_date grouping pattern already used in
+        # get_hr_card_data / get_spo2_card_data / get_hrv_card_data / steps.
+        by_date: dict[str, dict] = {}
         for r in rows:
             try:
-                d = dt.fromisoformat(str(r.get("measured_at")).replace("Z", "+00:00"))
-                labels.append(_WEEKDAY_ABBR[d.weekday()])
+                measured_dt = dt.fromisoformat(str(r.get("measured_at")).replace("Z", "+00:00"))
             except Exception:
-                labels.append("")
+                continue
+            date_key = _fmt_date(measured_dt)
+            existing = by_date.get(date_key)
+            if existing is None or str(r.get("measured_at")) > str(existing.get("measured_at")):
+                by_date[date_key] = r
+
+        sbp_values, dbp_values, labels = [], [], []
+        for i in range(7):
+            day = now - timedelta(days=6 - i)
+            row = by_date.get(_fmt_date(day))
+            sbp_values.append(int(row["systolic"]) if row and row.get("systolic") else 0)
+            dbp_values.append(int(row["diastolic"]) if row and row.get("diastolic") else 0)
+            labels.append(_WEEKDAY_ABBR[day.weekday()])
+
         sbp_nz = [v for v in sbp_values if v > 0]
         dbp_nz = [v for v in dbp_values if v > 0]
+        if not sbp_nz and not dbp_nz:
+            return None
+
         return {
             "type": "bp_trend",
             "data": {
@@ -361,7 +384,7 @@ async def get_bp_card_data(user_id: str) -> Optional[dict[str, Any]]:
         }
     except Exception as e:
         print(f"Error fetching BP card data: {e}")
-        return demo
+        return None
 
 async def get_steps_card_data(user_id: str) -> Optional[dict[str, Any]]:
     demo = {
