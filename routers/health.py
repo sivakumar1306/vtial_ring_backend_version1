@@ -605,29 +605,17 @@ async def get_insights(user_id: str):
         else:
             updates = changes[:2]
 
-        # --- Headline + subtext ---
+        # --- Headline + subtext (Deterministic 0-LLM fallback to save API rate limits for /chat) ---
         if changes:
-            try:
-                headline_data = await _call_llm_for_headline(changes, alarming_changes)
-            except Exception as e:
-                print(f"[get_insights] LLM headline generation failed, using template fallback: {e}")
-                headline_data = _template_headline(changes, alarming_changes)
+            headline_data = _template_headline(changes, alarming_changes)
         elif current_status_parts:
-            # Tier 2: nothing changed significantly, but real current readings
-            # exist — show an LLM-phrased steady-vitals status summary instead
-            # of a bare "not enough data" message, with a deterministic
-            # template fallback if the LLM call fails.
-            try:
-                headline_data = await _call_llm_for_steady_status(current_status_parts)
-            except Exception as e:
-                print(f"[get_insights] LLM steady-status generation failed, using template fallback: {e}")
-                headline_data = {
-                    "headline_parts": [
-                        {"text": "Your vitals look ", "highlight": False},
-                        {"text": "steady", "highlight": True},
-                    ],
-                    "subtext": f"Latest readings: {', '.join(current_status_parts)}.",
-                }
+            headline_data = {
+                "headline_parts": [
+                    {"text": "Your vitals look ", "highlight": False},
+                    {"text": "steady", "highlight": True},
+                ],
+                "subtext": f"Latest readings: {', '.join(current_status_parts)}.",
+            }
         else:
             headline_data = _template_headline(changes, alarming_changes)
 
