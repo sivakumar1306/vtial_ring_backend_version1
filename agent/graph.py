@@ -121,15 +121,7 @@ def _fmt_date(d: dt) -> str:
 async def get_sleep_card_data(user_id: str) -> Optional[dict[str, Any]]:
     try:
         if not user_id or user_id == "anonymous":
-            return {
-                "type": "sleep_highlights",
-                "data": {
-                    "time_awake_min": 10,
-                    "light_sleep_min": 63,
-                    "deep_sleep_min": 250,
-                    "total_label": "5 hours and 13 minutes"
-                }
-            }
+            return None
 
         def _query():
             return supabase.table("user_sleep")\
@@ -169,15 +161,7 @@ async def get_sleep_card_data(user_id: str) -> Optional[dict[str, Any]]:
     except Exception as e:
         print(f"Error fetching sleep card data: {e}")
 
-    return {
-        "type": "sleep_highlights",
-        "data": {
-            "time_awake_min": 10,
-            "light_sleep_min": 63,
-            "deep_sleep_min": 250,
-            "total_label": "5 hours and 13 minutes"
-        }
-    }
+    return None
 
 async def get_hr_card_data(user_id: str) -> Optional[dict[str, Any]]:
     demo = {
@@ -189,7 +173,7 @@ async def get_hr_card_data(user_id: str) -> Optional[dict[str, Any]]:
         }
     }
     if not user_id or user_id == "anonymous":
-        return demo
+        return None
     try:
         now = dt.utcnow()
 
@@ -201,7 +185,7 @@ async def get_hr_card_data(user_id: str) -> Optional[dict[str, Any]]:
         result = await asyncio.to_thread(_query)
         rows = result.data or []
         if not rows:
-            return demo
+            return None
         by_date = {r["date"]: r for r in rows}
         values, labels = [], []
         for i in range(7):
@@ -225,7 +209,7 @@ async def get_hr_card_data(user_id: str) -> Optional[dict[str, Any]]:
         }
     except Exception as e:
         print(f"Error fetching HR card data: {e}")
-        return demo
+        return None
 
 async def get_spo2_card_data(user_id: str) -> Optional[dict[str, Any]]:
     demo = {
@@ -237,7 +221,7 @@ async def get_spo2_card_data(user_id: str) -> Optional[dict[str, Any]]:
         }
     }
     if not user_id or user_id == "anonymous":
-        return demo
+        return None
     try:
         now = dt.utcnow()
 
@@ -249,7 +233,7 @@ async def get_spo2_card_data(user_id: str) -> Optional[dict[str, Any]]:
         result = await asyncio.to_thread(_query)
         rows = result.data or []
         if not rows:
-            return demo
+            return None
         by_date = {r["date"]: r for r in rows}
         values, labels = [], []
         for i in range(7):
@@ -273,7 +257,7 @@ async def get_spo2_card_data(user_id: str) -> Optional[dict[str, Any]]:
         }
     except Exception as e:
         print(f"Error fetching SpO2 card data: {e}")
-        return demo
+        return None
 
 async def get_hrv_card_data(user_id: str) -> Optional[dict[str, Any]]:
     demo = {
@@ -285,7 +269,7 @@ async def get_hrv_card_data(user_id: str) -> Optional[dict[str, Any]]:
         }
     }
     if not user_id or user_id == "anonymous":
-        return demo
+        return None
     try:
         now = dt.utcnow()
 
@@ -297,7 +281,7 @@ async def get_hrv_card_data(user_id: str) -> Optional[dict[str, Any]]:
         result = await asyncio.to_thread(_query)
         rows = result.data or []
         if not rows:
-            return demo
+            return None
         by_date = {r["date"]: r for r in rows}
         values, labels = [], []
         for i in range(7):
@@ -321,7 +305,7 @@ async def get_hrv_card_data(user_id: str) -> Optional[dict[str, Any]]:
         }
     except Exception as e:
         print(f"Error fetching HRV card data: {e}")
-        return demo
+        return None
 
 async def get_bp_card_data(user_id: str) -> Optional[dict[str, Any]]:
     # No hardcoded/demo fallback for this card (unlike the others above) —
@@ -402,7 +386,7 @@ async def get_steps_card_data(user_id: str) -> Optional[dict[str, Any]]:
         }
     }
     if not user_id or user_id == "anonymous":
-        return demo
+        return None
     try:
         now = dt.utcnow()
 
@@ -414,7 +398,7 @@ async def get_steps_card_data(user_id: str) -> Optional[dict[str, Any]]:
         result = await asyncio.to_thread(_query)
         rows = result.data or []
         if not rows:
-            return demo
+            return None
         by_date = {r["date"]: r for r in rows}
         values, labels = [], []
         for i in range(7):
@@ -434,7 +418,7 @@ async def get_steps_card_data(user_id: str) -> Optional[dict[str, Any]]:
         }
     except Exception as e:
         print(f"Error fetching steps card data: {e}")
-        return demo
+        return None
 
 async def get_temperature_card_data(user_id: str) -> Optional[dict[str, Any]]:
     if not user_id or user_id == "anonymous":
@@ -561,7 +545,7 @@ async def get_cycle_card_data(user_id: str) -> Optional[dict[str, Any]]:
         }
     }
     if not user_id or user_id == "anonymous":
-        return demo
+        return None
     try:
         def _query():
             return supabase.table("user_cycles").select("*").eq("user_id", user_id)\
@@ -570,7 +554,7 @@ async def get_cycle_card_data(user_id: str) -> Optional[dict[str, Any]]:
         result = await asyncio.to_thread(_query)
         rows = result.data or []
         if not rows:
-            return demo
+            return None
 
         c = rows[0]
         p_start_str = c.get("period_start")
@@ -614,7 +598,7 @@ async def get_cycle_card_data(user_id: str) -> Optional[dict[str, Any]]:
         }
     except Exception as e:
         print(f"Error fetching cycle card data: {e}")
-        return demo
+        return None
 
 async def run_agent(message: str, user_id: str) -> tuple[str, Optional[dict[str, Any]]]:
     try:
