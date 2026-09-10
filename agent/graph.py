@@ -1,6 +1,6 @@
 import asyncio
 import time
-from langchain_mistralai import ChatMistralAI
+from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 from agent.tools import (
@@ -71,7 +71,7 @@ No real-time heart rate reading is available right now.
 """
 
 # Cached at module level instead of recreated on every /chat request — building
-# a fresh ChatMistralAI client + react-agent graph per call was wasted work on
+# a fresh ChatGroq client + react-agent graph per call was wasted work on
 # every single request for no benefit, since none of it depends on per-request
 # state (message/user_id are only passed in at invoke time, not construction time).
 _AGENT = None
@@ -80,9 +80,9 @@ _LLM = None
 def get_medxai_llm():
     global _LLM
     if _LLM is None:
-        _LLM = ChatMistralAI(
-            api_key=os.getenv("MISTRAL_API_KEY"),
-            model="mistral-small-latest",
+        _LLM = ChatGroq(
+            api_key=os.getenv("GROQ_API_KEY") or os.getenv("MISTRAL_API_KEY"),
+            model="llama-3.3-70b-versatile",
             temperature=0.1,
         )
     return _LLM
