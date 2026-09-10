@@ -30,7 +30,7 @@ Important rules:
 - Always call check_emergency first if the message mentions any physical symptom or complaint
 - Users may make spelling mistakes or typos — always interpret their intent charitably and respond helpfully. For example "dibeties" means "diabetes", "symtoms" means "symptoms", "herat" means "heart". Never reject a message due to spelling.
 - If a tool call fails and the user is asking a GENERAL medical question (e.g. "what causes a headache"), you may still answer from general medical knowledge.
-- If a tool call fails or no ring biometric data is found for the user, respond clearly: "Please connect your ring to view analysis." Never substitute a plausible-sounding number.
+- If a tool call fails or no ring biometric data is found for the user, respond clearly: "Not enough continuous biometric data is available yet. Please wear your ring continuously to record readings." Never substitute a plausible-sounding number.
 - Never diagnose — only provide health insights and guidance
 - Always recommend seeing a doctor for serious concerns
 - CRITICAL — DATA ACCURACY: You must ALWAYS call get_patient_data before answering ANY question about the user's own biometrics, even if you think you already know the answer from earlier in the conversation. Only state numeric values that appear VERBATIM in that tool's output. Never estimate, round, infer, average, or invent a number that isn't explicitly present in the tool result. If you cannot find a requested value anywhere in the tool output, say so explicitly instead of producing a number.
@@ -457,7 +457,7 @@ async def get_temperature_card_data(user_id: str) -> Optional[dict[str, Any]]:
             labels.append(_WEEKDAY_ABBR[day.weekday()])
 
         non_zero = [v for v in values if v > 0]
-        if not non_zero:
+        if len(non_zero) < 2:
             return None
 
         all_vals = [float(r["value_c"]) for r in rows if r.get("value_c") is not None]
@@ -513,7 +513,7 @@ async def get_stress_card_data(user_id: str) -> Optional[dict[str, Any]]:
             labels.append(_WEEKDAY_ABBR[day.weekday()])
 
         non_zero = [v for v in values if v > 0]
-        if not non_zero:
+        if len(non_zero) < 2:
             return None
 
         all_vals = [int(r["stress_value"]) for r in rows if r.get("stress_value") is not None]
@@ -641,14 +641,14 @@ async def run_agent(message: str, user_id: str) -> tuple[str, Optional[dict[str,
         if card_task:
             llm_res, card = await asyncio.gather(
                 llm.ainvoke([
-                    SystemMessage(content=SYSTEM_PROMPT),
+                    SystemMessage(content=SYSTEM_PROMPT + "\n- Direct response mode: Answer the user question in plain text using the patient data provided. Do not output tool calls."),
                     HumanMessage(content=full_user_content)
                 ]),
                 card_task
             )
         else:
             llm_res = await llm.ainvoke([
-                SystemMessage(content=SYSTEM_PROMPT),
+                SystemMessage(content=SYSTEM_PROMPT + "\n- Direct response mode: Answer the user question in plain text using the patient data provided. Do not output tool calls."),
                 HumanMessage(content=full_user_content)
             ])
             card = None
