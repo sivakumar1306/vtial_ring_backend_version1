@@ -243,7 +243,7 @@ async def _call_llm_for_headline(changes: list, alarming_changes: list) -> dict:
 
     llm = ChatGroq(
         api_key=os.getenv("GROQ_API_KEY") or os.getenv("MISTRAL_API_KEY"),
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         temperature=0.2,
     )
     # await .ainvoke(), not the blocking .invoke() — this single call was the
@@ -291,7 +291,7 @@ async def _call_llm_for_steady_status(current_status_parts: list) -> dict:
 
     llm = ChatGroq(
         api_key=os.getenv("GROQ_API_KEY") or os.getenv("MISTRAL_API_KEY"),
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         temperature=0.2,
     )
     result = await llm.ainvoke([

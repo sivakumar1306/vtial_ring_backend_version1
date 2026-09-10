@@ -10,7 +10,7 @@ print("Key loaded:", bool(key), "starts with:", key[:6] if key else None)
 if not key:
     print("Error: Neither GROQ_API_KEY nor MISTRAL_API_KEY found in environment.")
 else:
-    llm = ChatGroq(api_key=key, model="llama-3.3-70b-versatile", temperature=0.1)
+    llm = ChatGroq(api_key=key, model="openai/gpt-oss-120b", temperature=0.1)
     try:
         response = llm.invoke("Say hello in one word")
         print("Response:", response.content)

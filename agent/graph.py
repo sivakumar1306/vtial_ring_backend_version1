@@ -82,7 +82,7 @@ def get_medxai_llm():
     if _LLM is None:
         _LLM = ChatGroq(
             api_key=os.getenv("GROQ_API_KEY") or os.getenv("MISTRAL_API_KEY"),
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             temperature=0.1,
         )
     return _LLM
