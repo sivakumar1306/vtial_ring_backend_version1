@@ -1,6 +1,7 @@
 from langchain_core.tools import tool
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+from agent.biometrics import cycle_snapshot, format_hm, local_today, seconds_to_minutes
 from db.supabase import supabase
 
 # All measured_at / date-ish timestamps from Supabase are stored in UTC.
@@ -93,7 +94,9 @@ def get_patient_data(user_id: str) -> str:
             f_bp = executor.submit(_fetch_table, "user_bp", "measured_at", 1)
             f_temp = executor.submit(_fetch_table, "user_temp", "measured_at", 1)
             f_stress = executor.submit(_fetch_table, "user_stress", "measured_at", 3)
-            f_cycles = executor.submit(_fetch_table, "user_cycles", "period_start", 2)
+            # The app writes flow days to user_symptoms and reads this view.
+            # user_cycles is not filled by the current client.
+            f_cycles = executor.submit(_fetch_table, "derived_user_cycles", "period_start", 2)
 
             profile = f_profile.result()
             current_hr = f_curr_hr.result()
@@ -136,10 +139,19 @@ PATIENT PROFILE:
             context += "\nCURRENT HEART RATE: NO reading found in database for this user.\n"
 
         if sleep:
-            context += "\nRECENT SLEEP:\n"
+            context += "\nRECENT SLEEP (durations already converted from seconds):\n"
             for day in reversed(sleep):
-                total_min = day.get("total_duration") or 0
-                context += f"- {day.get('date')}: {total_min // 60}h {total_min % 60}m, score {day.get('sleep_score')}/100\n"
+                total_min = seconds_to_minutes(day.get("total_duration"))
+                awake_min = seconds_to_minutes(day.get("awake_duration"))
+                light_min = seconds_to_minutes(day.get("light_duration"))
+                deep_min = seconds_to_minutes(day.get("deep_duration"))
+                rem_min = seconds_to_minutes(day.get("rem_duration"))
+                context += (
+                    f"- {day.get('date')}: {format_hm(total_min)} total, "
+                    f"awake {format_hm(awake_min)}, light {format_hm(light_min)}, "
+                    f"deep {format_hm(deep_min)}, rem {format_hm(rem_min)}, "
+                    f"score {day.get('sleep_score')}/100\n"
+                )
 
         if hr:
             context += "\nHISTORICAL DAILY HEART RATE (NOT the current/live reading):\n"
@@ -181,31 +193,31 @@ PATIENT PROFILE:
 
         if cycles:
             context += "\nMENSTRUAL CYCLE LOGS:\n"
+            today = local_today()
             for cy in reversed(cycles):
-                p_start = cy.get("period_start") or "unknown"
-                p_end = cy.get("period_end") or "ongoing"
-                c_len = cy.get("cycle_length") or 28
-                p_len = cy.get("period_length") or 5
-                est_next_str = "unknown"
-                days_until = "unknown"
-                curr_day_str = "unknown"
-                if p_start != "unknown":
-                    try:
-                        p_start_dt = datetime.strptime(p_start, "%Y-%m-%d")
-                        today = datetime.utcnow().date()
-                        delta_days = (today - p_start_dt.date()).days
-                        if delta_days >= 0:
-                            curr_day = (delta_days % c_len) + 1
-                            days_until = c_len - (delta_days % c_len)
-                            next_dt = today + timedelta(days=days_until)
-                            est_next_str = next_dt.strftime("%d %B %Y")
-                            curr_day_str = f"Day {curr_day}"
-                    except Exception:
-                        pass
-                context += f"- Period start: {p_start}, period end: {p_end}, cycle length: {c_len} days, period length: {p_len} days. Currently at {curr_day_str}. Estimated next period: {est_next_str} (in {days_until} days).\n"
+                try:
+                    snap = cycle_snapshot(
+                        cy.get("period_start"),
+                        cy.get("cycle_length"),
+                        cy.get("period_length"),
+                        today,
+                    )
+                except Exception:
+                    continue
+                if snap["current_day"] <= 0:
+                    when = "period has not started"
+                else:
+                    when = f"Day {snap['current_day']} ({snap['phase']})"
+                context += (
+                    f"- Period start: {snap['period_start']}, "
+                    f"cycle length: {snap['cycle_length']} days, "
+                    f"period length: {snap['period_length']} days. "
+                    f"Currently at {when}. "
+                    f"Days until next period: {snap['days_until_next']}.\n"
+                )
 
         result = context.strip() if context else "No biometric or ring data found for this user. The ring is not connected or has not synced readings. Tell the user: Please connect your ring to view analysis."
-        print(f"[get_patient_data] user_id={user_id}\n---TOOL OUTPUT SENT TO LLM---\n{result}\n---END TOOL OUTPUT---")
+        print(f"[get_patient_data] user_id={user_id} chars={len(result)}")
         return result
     except Exception as e:
         error_msg = f"Failed to fetch patient data: {str(e)}"

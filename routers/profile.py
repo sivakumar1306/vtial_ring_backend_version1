@@ -1,7 +1,10 @@
-from fastapi import APIRouter
+import asyncio
+
+from fastapi import APIRouter, Header
 from pydantic import BaseModel
 from typing import List, Optional
 from db.supabase import supabase
+from services.identity import resolve_user_id
 
 router = APIRouter()
 
@@ -16,32 +19,34 @@ class ProfileRequest(BaseModel):
     allergies: Optional[List[str]] = []
 
 @router.post("/profile")
-async def save_profile(request: ProfileRequest):
-    try:
+async def save_profile(request: ProfileRequest, authorization: str | None = Header(default=None)):
+    user_id = await resolve_user_id(authorization, request.user_id, allow_anonymous=False)
+    data = {
+        "user_id": user_id,
+        "age": request.age,
+        "blood_type": request.blood_type,
+        "conditions": request.conditions,
+        "medications": request.medications,
+        "allergies": request.allergies,
+    }
+
+    def _save():
         existing = supabase.table("health_profiles")\
             .select("id")\
-            .eq("user_id", request.user_id)\
+            .eq("user_id", user_id)\
             .execute()
-
-        data = {
-            "user_id": request.user_id,
-            "age": request.age,
-            "blood_type": request.blood_type,
-            "conditions": request.conditions,
-            "medications": request.medications,
-            "allergies": request.allergies,
-        }
-
         if existing.data:
             supabase.table("health_profiles")\
                 .update(data)\
-                .eq("user_id", request.user_id)\
+                .eq("user_id", user_id)\
                 .execute()
         else:
             supabase.table("health_profiles")\
                 .insert(data)\
                 .execute()
 
+    try:
+        await asyncio.to_thread(_save)
         return {"message": "Profile saved successfully"}
-    except Exception as e:
-        return {"error": str(e)}
+    except Exception:
+        return {"error": "Could not save profile"}

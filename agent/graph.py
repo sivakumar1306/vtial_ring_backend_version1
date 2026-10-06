@@ -1,8 +1,19 @@
 import asyncio
 import time
 from langchain_groq import ChatGroq
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
+from agent.biometrics import (
+    cycle_snapshot,
+    last_7_local_dates,
+    local_date_key,
+    local_today,
+    message_text,
+    select_card_kind,
+    sleep_card_data,
+    weekday_label,
+    window_start_utc_iso,
+)
 from agent.tools import (
     search_medical_knowledge,
     get_patient_data,
@@ -10,8 +21,6 @@ from agent.tools import (
     analyze_symptoms
 )
 import os
-import re
-from datetime import datetime as dt, timedelta
 from dotenv import load_dotenv
 from typing import Any, Optional
 from db.supabase import supabase
@@ -20,17 +29,17 @@ load_dotenv()
 
 SYSTEM_PROMPT = """You are MedXAI, an intelligent AI health assistant connected to a patient's smart ring data.
 
-You have 4 tools available:
-1. check_emergency — ALWAYS call this first for any health complaint or symptom
-2. get_patient_data — call this when the user asks about their personal health, biometrics, or ring data
-3. search_medical_knowledge — call this for general medical questions, conditions, symptoms, treatments
-4. analyze_symptoms — call this when the user lists multiple symptoms together
+The latest user message already contains everything you may cite:
+- PATIENT DATA: this person's profile and ring biometrics, fetched for this request. This is the only source of numeric readings.
+- MEDICAL EXCERPTS: optional passages from the medical knowledge base. They are included for general health questions and omitted for ring-only questions.
+- Earlier chat turns, when present, are conversation context only. If they disagree with PATIENT DATA, trust PATIENT DATA.
+
+Do not call tools. Do not write tool-call syntax, function names, or JSON tool requests. Answer in plain text.
 
 Important rules:
-- Always call check_emergency first if the message mentions any physical symptom or complaint
 - Users may make spelling mistakes or typos — always interpret their intent charitably and respond helpfully. For example "dibeties" means "diabetes", "symtoms" means "symptoms", "herat" means "heart". Never reject a message due to spelling.
-- If a tool call fails and the user is asking a GENERAL medical question (e.g. "what causes a headache"), you may still answer from general medical knowledge.
-- If a tool call fails or no ring biometric data is found for the user, respond clearly: "Not enough continuous biometric data is available yet. Please wear your ring continuously to record readings." Never substitute a plausible-sounding number.
+- If MEDICAL EXCERPTS are absent, you may give brief general health information and make clear it is not from this patient's records.
+- If PATIENT DATA says a reading was not found, or no ring biometric data is present, respond clearly: "Not enough continuous biometric data is available yet. Please wear your ring continuously to record readings." Never substitute a plausible-sounding number.
 - Never diagnose — only provide health insights and guidance
 - Always recommend seeing a doctor for serious concerns
 - CRITICAL — DATA ACCURACY: You must ALWAYS call get_patient_data before answering ANY question about the user's own biometrics, even if you think you already know the answer from earlier in the conversation. Only state numeric values that appear VERBATIM in that tool's output. Never estimate, round, infer, average, or invent a number that isn't explicitly present in the tool result. If you cannot find a requested value anywhere in the tool output, say so explicitly instead of producing a number.
@@ -113,11 +122,6 @@ def get_medxai_agent():
 # blocking call on a background thread instead, so the event loop stays free
 # to serve other requests while this one waits on the DB.
 
-_WEEKDAY_ABBR = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-
-def _fmt_date(d: dt) -> str:
-    return d.strftime('%Y-%m-%d')
-
 async def get_sleep_card_data(user_id: str) -> Optional[dict[str, Any]]:
     try:
         if not user_id or user_id == "anonymous":
@@ -134,65 +138,45 @@ async def get_sleep_card_data(user_id: str) -> Optional[dict[str, Any]]:
         r = await asyncio.to_thread(_query)
 
         if r.data:
-            row = r.data[0]
-            total_val = row.get("total_duration") or 0
-            if total_val > 1440:
-                total_min = total_val // 60
-            else:
-                total_min = total_val
-
-            hours = total_min // 60
-            minutes = total_min % 60
-            total_label = f"{hours} hour{'s' if hours != 1 else ''} and {minutes} minute{'s' if minutes != 1 else ''}"
-
-            time_awake_min = int(total_min * 0.05)
-            deep_sleep_min = int(total_min * 0.25)
-            light_sleep_min = total_min - time_awake_min - deep_sleep_min
-
-            return {
-                "type": "sleep_highlights",
-                "data": {
-                    "time_awake_min": time_awake_min,
-                    "light_sleep_min": light_sleep_min,
-                    "deep_sleep_min": deep_sleep_min,
-                    "total_label": total_label
-                }
-            }
+            return sleep_card_data(r.data[0])
     except Exception as e:
         print(f"Error fetching sleep card data: {e}")
 
     return None
 
+def _date_window() -> tuple[str, str]:
+    days = last_7_local_dates()
+    return days[0].isoformat(), days[-1].isoformat()
+
+
+def _series_for(by_date: dict, value_fn) -> tuple[list, list]:
+    values, labels = [], []
+    for day in last_7_local_dates():
+        values.append(value_fn(by_date.get(day.isoformat())))
+        labels.append(weekday_label(day))
+    return values, labels
+
+
 async def get_hr_card_data(user_id: str) -> Optional[dict[str, Any]]:
-    demo = {
-        "type": "heart_rate_trend",
-        "data": {
-            "avg": 78, "min": 58, "max": 112, "unit": "bpm",
-            "values": [72, 75, 80, 77, 82, 79, 78],
-            "labels": _WEEKDAY_ABBR,
-        }
-    }
     if not user_id or user_id == "anonymous":
         return None
     try:
-        now = dt.utcnow()
+        start, end = _date_window()
 
         def _query():
             return supabase.table("user_hr").select("*").eq("user_id", user_id)\
-                .gte("date", _fmt_date(now - timedelta(days=6)))\
-                .lte("date", _fmt_date(now)).order("date", desc=False).execute()
+                .gte("date", start)\
+                .lte("date", end).order("date", desc=False).execute()
 
         result = await asyncio.to_thread(_query)
         rows = result.data or []
         if not rows:
             return None
-        by_date = {r["date"]: r for r in rows}
-        values, labels = [], []
-        for i in range(7):
-            day = now - timedelta(days=6 - i)
-            row = by_date.get(_fmt_date(day))
-            values.append(int(row["avg_hr"]) if row and row.get("avg_hr") else 0)
-            labels.append(_WEEKDAY_ABBR[day.weekday()])
+        by_date = {str(r.get("date"))[:10]: r for r in rows if r.get("date")}
+        values, labels = _series_for(
+            by_date,
+            lambda row: int(row["avg_hr"]) if row and row.get("avg_hr") else 0,
+        )
         non_zero = [v for v in values if v > 0]
         mins = [int(r["min_hr"]) for r in rows if r.get("min_hr")]
         maxs = [int(r["max_hr"]) for r in rows if r.get("max_hr")]
@@ -212,35 +196,25 @@ async def get_hr_card_data(user_id: str) -> Optional[dict[str, Any]]:
         return None
 
 async def get_spo2_card_data(user_id: str) -> Optional[dict[str, Any]]:
-    demo = {
-        "type": "spo2_trend",
-        "data": {
-            "avg": 97, "min": 94, "max": 99, "unit": "%",
-            "values": [96, 97, 98, 97, 95, 98, 97],
-            "labels": _WEEKDAY_ABBR,
-        }
-    }
     if not user_id or user_id == "anonymous":
         return None
     try:
-        now = dt.utcnow()
+        start, end = _date_window()
 
         def _query():
             return supabase.table("user_spo2").select("*").eq("user_id", user_id)\
-                .gte("date", _fmt_date(now - timedelta(days=6)))\
-                .lte("date", _fmt_date(now)).order("date", desc=False).execute()
+                .gte("date", start)\
+                .lte("date", end).order("date", desc=False).execute()
 
         result = await asyncio.to_thread(_query)
         rows = result.data or []
         if not rows:
             return None
-        by_date = {r["date"]: r for r in rows}
-        values, labels = [], []
-        for i in range(7):
-            day = now - timedelta(days=6 - i)
-            row = by_date.get(_fmt_date(day))
-            values.append(int(row["avg_spo2"]) if row and row.get("avg_spo2") else 0)
-            labels.append(_WEEKDAY_ABBR[day.weekday()])
+        by_date = {str(r.get("date"))[:10]: r for r in rows if r.get("date")}
+        values, labels = _series_for(
+            by_date,
+            lambda row: int(row["avg_spo2"]) if row and row.get("avg_spo2") else 0,
+        )
         non_zero = [v for v in values if v > 0]
         mins = [int(r["min_spo2"]) for r in rows if r.get("min_spo2")]
         maxs = [int(r["max_spo2"]) for r in rows if r.get("max_spo2")]
@@ -260,35 +234,25 @@ async def get_spo2_card_data(user_id: str) -> Optional[dict[str, Any]]:
         return None
 
 async def get_hrv_card_data(user_id: str) -> Optional[dict[str, Any]]:
-    demo = {
-        "type": "hrv_trend",
-        "data": {
-            "avg": 52, "min": 30, "max": 78, "unit": "ms",
-            "values": [45, 50, 55, 48, 60, 52, 52],
-            "labels": _WEEKDAY_ABBR,
-        }
-    }
     if not user_id or user_id == "anonymous":
         return None
     try:
-        now = dt.utcnow()
+        start, end = _date_window()
 
         def _query():
             return supabase.table("user_hrv").select("*").eq("user_id", user_id)\
-                .gte("date", _fmt_date(now - timedelta(days=6)))\
-                .lte("date", _fmt_date(now)).order("date", desc=False).execute()
+                .gte("date", start)\
+                .lte("date", end).order("date", desc=False).execute()
 
         result = await asyncio.to_thread(_query)
         rows = result.data or []
         if not rows:
             return None
-        by_date = {r["date"]: r for r in rows}
-        values, labels = [], []
-        for i in range(7):
-            day = now - timedelta(days=6 - i)
-            row = by_date.get(_fmt_date(day))
-            values.append(int(row["avg_hrv"]) if row and row.get("avg_hrv") else 0)
-            labels.append(_WEEKDAY_ABBR[day.weekday()])
+        by_date = {str(r.get("date"))[:10]: r for r in rows if r.get("date")}
+        values, labels = _series_for(
+            by_date,
+            lambda row: int(row["avg_hrv"]) if row and row.get("avg_hrv") else 0,
+        )
         non_zero = [v for v in values if v > 0]
         mins = [int(r["min_hrv"]) for r in rows if r.get("min_hrv")]
         maxs = [int(r["max_hrv"]) for r in rows if r.get("max_hrv")]
@@ -308,21 +272,16 @@ async def get_hrv_card_data(user_id: str) -> Optional[dict[str, Any]]:
         return None
 
 async def get_bp_card_data(user_id: str) -> Optional[dict[str, Any]]:
-    # No hardcoded/demo fallback for this card (unlike the others above) —
-    # blood pressure readings are sparse and irregular enough that a fake
-    # "118/76, 7 day trend" looked indistinguishable from real data and
-    # actively contradicted the chat reply when no real BP data existed.
-    # Returning None here means chat_screen.dart's `if (card != null)` check
-    # simply skips rendering the card — confirmed this is already handled
-    # correctly on the frontend, no card is safer than a fabricated one.
+    # No fabricated series. A missing reading returns None, and the chat
+    # screen skips the card. A fake 7-day trend is worse than no card.
     if not user_id or user_id == "anonymous":
         return None
     try:
-        now = dt.utcnow()
+        cutoff = window_start_utc_iso(6)
 
         def _query():
             return supabase.table("user_bp").select("*").eq("user_id", user_id)\
-                .gte("measured_at", (now - timedelta(days=6)).isoformat())\
+                .gte("measured_at", cutoff)\
                 .order("measured_at", desc=False).execute()
 
         result = await asyncio.to_thread(_query)
@@ -330,32 +289,25 @@ async def get_bp_card_data(user_id: str) -> Optional[dict[str, Any]]:
         if not rows:
             return None
 
-        # Multiple BP readings can land on the same calendar day (confirmed
-        # via direct query: users often take several readings within minutes
-        # of each other). Keep only the LATEST reading per day so a "7 day
-        # trend" actually spans 7 distinct calendar days instead of the last
-        # 7 raw rows, which could all fall within 1-2 days and repeat the
-        # same weekday label (e.g. "Sat, Sun, Sun, Sun, Sun, Sun, Sun").
-        # Mirrors the by_date grouping pattern already used in
-        # get_hr_card_data / get_spo2_card_data / get_hrv_card_data / steps.
+        # Multiple BP readings can land on the same calendar day. Keep only
+        # the latest reading per local date so the trend spans distinct days.
         by_date: dict[str, dict] = {}
         for r in rows:
-            try:
-                measured_dt = dt.fromisoformat(str(r.get("measured_at")).replace("Z", "+00:00"))
-            except Exception:
+            date_key = local_date_key(r.get("measured_at"))
+            if not date_key:
                 continue
-            date_key = _fmt_date(measured_dt)
             existing = by_date.get(date_key)
             if existing is None or str(r.get("measured_at")) > str(existing.get("measured_at")):
                 by_date[date_key] = r
 
-        sbp_values, dbp_values, labels = [], [], []
-        for i in range(7):
-            day = now - timedelta(days=6 - i)
-            row = by_date.get(_fmt_date(day))
-            sbp_values.append(int(row["systolic"]) if row and row.get("systolic") else 0)
-            dbp_values.append(int(row["diastolic"]) if row and row.get("diastolic") else 0)
-            labels.append(_WEEKDAY_ABBR[day.weekday()])
+        sbp_values, labels = _series_for(
+            by_date,
+            lambda row: int(row["systolic"]) if row and row.get("systolic") else 0,
+        )
+        dbp_values, _ = _series_for(
+            by_date,
+            lambda row: int(row["diastolic"]) if row and row.get("diastolic") else 0,
+        )
 
         sbp_nz = [v for v in sbp_values if v > 0]
         dbp_nz = [v for v in dbp_values if v > 0]
@@ -377,35 +329,25 @@ async def get_bp_card_data(user_id: str) -> Optional[dict[str, Any]]:
         return None
 
 async def get_steps_card_data(user_id: str) -> Optional[dict[str, Any]]:
-    demo = {
-        "type": "steps_trend",
-        "data": {
-            "avg": 6400, "unit": "steps",
-            "values": [5200, 7100, 6800, 4900, 8200, 6300, 6400],
-            "labels": _WEEKDAY_ABBR,
-        }
-    }
     if not user_id or user_id == "anonymous":
         return None
     try:
-        now = dt.utcnow()
+        start, end = _date_window()
 
         def _query():
             return supabase.table("user_steps").select("*").eq("user_id", user_id)\
-                .gte("date", _fmt_date(now - timedelta(days=6)))\
-                .lte("date", _fmt_date(now)).order("date", desc=False).execute()
+                .gte("date", start)\
+                .lte("date", end).order("date", desc=False).execute()
 
         result = await asyncio.to_thread(_query)
         rows = result.data or []
         if not rows:
             return None
-        by_date = {r["date"]: r for r in rows}
-        values, labels = [], []
-        for i in range(7):
-            day = now - timedelta(days=6 - i)
-            row = by_date.get(_fmt_date(day))
-            values.append(int(row["steps"]) if row and row.get("steps") else 0)
-            labels.append(_WEEKDAY_ABBR[day.weekday()])
+        by_date = {str(r.get("date"))[:10]: r for r in rows if r.get("date")}
+        values, labels = _series_for(
+            by_date,
+            lambda row: int(row["steps"]) if row and row.get("steps") else 0,
+        )
         non_zero = [v for v in values if v > 0]
         return {
             "type": "steps_trend",
@@ -424,8 +366,7 @@ async def get_temperature_card_data(user_id: str) -> Optional[dict[str, Any]]:
     if not user_id or user_id == "anonymous":
         return None
     try:
-        now = dt.utcnow()
-        cutoff_str = _fmt_date(now - timedelta(days=6))
+        cutoff_str = window_start_utc_iso(6)
 
         def _query():
             return supabase.table("user_temp").select("*").eq("user_id", user_id)\
@@ -439,22 +380,17 @@ async def get_temperature_card_data(user_id: str) -> Optional[dict[str, Any]]:
 
         by_date: dict[str, list[float]] = {}
         for r in rows:
-            try:
-                measured_dt = dt.fromisoformat(str(r.get("measured_at")).replace("Z", "+00:00"))
-            except Exception:
+            date_key = local_date_key(r.get("measured_at"))
+            if not date_key:
                 continue
-            date_key = _fmt_date(measured_dt)
             val = r.get("value_c")
             if val is not None:
                 by_date.setdefault(date_key, []).append(float(val))
 
-        values, labels = [], []
-        for i in range(7):
-            day = now - timedelta(days=6 - i)
-            day_vals = by_date.get(_fmt_date(day), [])
-            avg_day_val = round(sum(day_vals) / len(day_vals), 1) if day_vals else 0.0
-            values.append(avg_day_val)
-            labels.append(_WEEKDAY_ABBR[day.weekday()])
+        values, labels = _series_for(
+            by_date,
+            lambda day_vals: round(sum(day_vals) / len(day_vals), 1) if day_vals else 0.0,
+        )
 
         non_zero = [v for v in values if v > 0]
         if len(non_zero) < 2:
@@ -480,8 +416,7 @@ async def get_stress_card_data(user_id: str) -> Optional[dict[str, Any]]:
     if not user_id or user_id == "anonymous":
         return None
     try:
-        now = dt.utcnow()
-        cutoff_str = _fmt_date(now - timedelta(days=6))
+        cutoff_str = window_start_utc_iso(6)
 
         def _query():
             return supabase.table("user_stress").select("*").eq("user_id", user_id)\
@@ -495,22 +430,17 @@ async def get_stress_card_data(user_id: str) -> Optional[dict[str, Any]]:
 
         by_date: dict[str, list[int]] = {}
         for r in rows:
-            try:
-                measured_dt = dt.fromisoformat(str(r.get("measured_at")).replace("Z", "+00:00"))
-            except Exception:
+            date_key = local_date_key(r.get("measured_at"))
+            if not date_key:
                 continue
-            date_key = _fmt_date(measured_dt)
             val = r.get("stress_value")
             if val is not None:
                 by_date.setdefault(date_key, []).append(int(val))
 
-        values, labels = [], []
-        for i in range(7):
-            day = now - timedelta(days=6 - i)
-            day_vals = by_date.get(_fmt_date(day), [])
-            avg_day_val = round(sum(day_vals) / len(day_vals)) if day_vals else 0
-            values.append(avg_day_val)
-            labels.append(_WEEKDAY_ABBR[day.weekday()])
+        values, labels = _series_for(
+            by_date,
+            lambda day_vals: round(sum(day_vals) / len(day_vals)) if day_vals else 0,
+        )
 
         non_zero = [v for v in values if v > 0]
         if len(non_zero) < 2:
@@ -533,22 +463,12 @@ async def get_stress_card_data(user_id: str) -> Optional[dict[str, Any]]:
         return None
 
 async def get_cycle_card_data(user_id: str) -> Optional[dict[str, Any]]:
-    demo = {
-        "type": "cycle_trend",
-        "data": {
-            "period_start": "2026-07-17",
-            "cycle_length": 28,
-            "period_length": 5,
-            "current_day": 14,
-            "phase": "Ovulation Window",
-            "days_until_next": 14,
-        }
-    }
     if not user_id or user_id == "anonymous":
         return None
     try:
         def _query():
-            return supabase.table("user_cycles").select("*").eq("user_id", user_id)\
+            # Same view the app's Home cycle card reads (derived from flow days).
+            return supabase.table("derived_user_cycles").select("*").eq("user_id", user_id)\
                 .order("period_start", desc=True).limit(1).execute()
 
         result = await asyncio.to_thread(_query)
@@ -557,106 +477,133 @@ async def get_cycle_card_data(user_id: str) -> Optional[dict[str, Any]]:
             return None
 
         c = rows[0]
-        p_start_str = c.get("period_start")
-        cycle_len = c.get("cycle_length") or 28
-        period_len = c.get("period_length") or 5
-
-        current_day = 1
-        days_until_next = cycle_len
-        phase = "Follicular Phase"
-
-        if p_start_str:
-            try:
-                p_start_dt = dt.strptime(p_start_str, "%Y-%m-%d")
-                today = dt.utcnow().date()
-                delta_days = (today - p_start_dt.date()).days
-                if delta_days >= 0:
-                    current_day = (delta_days % cycle_len) + 1
-                    days_until_next = cycle_len - (delta_days % cycle_len)
-
-                    if current_day <= period_len:
-                        phase = "Menstrual Phase"
-                    elif current_day <= 13:
-                        phase = "Follicular Phase"
-                    elif current_day <= 16:
-                        phase = "Ovulation Window"
-                    else:
-                        phase = "Luteal Phase"
-            except Exception:
-                pass
-
-        return {
-            "type": "cycle_trend",
-            "data": {
-                "period_start": p_start_str or "Unknown",
-                "cycle_length": cycle_len,
-                "period_length": period_len,
-                "current_day": current_day,
-                "phase": phase,
-                "days_until_next": days_until_next,
-            }
-        }
+        snap = cycle_snapshot(
+            c.get("period_start"),
+            c.get("cycle_length"),
+            c.get("period_length"),
+            local_today(),
+        )
+        return {"type": "cycle_trend", "data": snap}
     except Exception as e:
         print(f"Error fetching cycle card data: {e}")
         return None
 
-async def run_agent(message: str, user_id: str) -> tuple[str, Optional[dict[str, Any]]]:
+_CARD_BUILDERS = {
+    "sleep": get_sleep_card_data,
+    "bp": get_bp_card_data,
+    "spo2": get_spo2_card_data,
+    "hrv": get_hrv_card_data,
+    "hr": get_hr_card_data,
+    "steps": get_steps_card_data,
+    "temperature": get_temperature_card_data,
+    "stress": get_stress_card_data,
+    "cycle": get_cycle_card_data,
+}
+
+_EXCERPT_TIMEOUT_S = 12
+
+
+async def _medical_excerpts(message: str) -> str:
+    """Knowledge-base passages for non-biometric questions.
+
+    The embedding lookup runs off the event loop and is capped so a cold
+    model load cannot consume the whole chat timeout. A miss still answers
+    from PATIENT DATA and general guidance.
+    """
     try:
-        t_start = time.monotonic()
+        from services.rag import excerpts_text, retrieve_for_chat, schedule_expansion
 
-        # 1. Fast-path emergency check in Python (0.001s, 0 LLM calls)
-        emerg_res = check_emergency.invoke(message)
-        if "EMERGENCY DETECTED" in emerg_res:
-            return emerg_res, None
+        results = await asyncio.wait_for(
+            asyncio.to_thread(retrieve_for_chat, message, 3),
+            timeout=_EXCERPT_TIMEOUT_S,
+        )
+    except Exception as exc:
+        print(f"[MedXAI] medical knowledge skipped: {type(exc).__name__}")
+        return ""
+    if results is None:
+        return ""
+    try:
+        await schedule_expansion(message, results)
+    except Exception as exc:
+        print(f"[MedXAI] knowledge expansion skipped: {type(exc).__name__}")
+    return excerpts_text(results)
 
-        # 2. Pre-fetch patient biometrics directly (0 LLM calls)
+
+async def run_agent(
+    message: str,
+    user_id: str,
+    conversation_id: str | None = None,
+) -> tuple[str, Optional[dict[str, Any]]]:
+    t_start = time.monotonic()
+
+    # 1. Fast-path emergency check in Python (0.001s, 0 LLM calls)
+    emerg_res = check_emergency.invoke(message)
+    if "EMERGENCY DETECTED" in emerg_res:
+        reply = (
+            "This needs emergency care right now.\n"
+            "- Call emergency services (112 in India) or go to the nearest emergency room\n"
+            "- Do not wait for the symptoms to pass\n"
+            "- This is general health information, not medical advice."
+        )
+        return reply, None
+
+    # 2. Patient biometrics. Anonymous callers never hit another user's rows.
+    if not user_id or user_id == "anonymous":
+        patient_data = (
+            "No biometric or ring data is available because this person is not signed in."
+        )
+    else:
         patient_data = await asyncio.to_thread(get_patient_data.invoke, user_id)
-        
-        # 3. Parallel card data lookup
-        msg_lower = message.lower()
-        card_task = None
-        if "sleep" in msg_lower:
-            card_task = get_sleep_card_data(user_id)
-        elif any(k in msg_lower for k in ["blood pressure", "systolic", "diastolic"]) or re.search(r'\bbp\b', msg_lower):
-            card_task = get_bp_card_data(user_id)
-        elif any(k in msg_lower for k in ["spo2", "sp02", "blood oxygen", "oxygen level", "oxygen saturation"]):
-            card_task = get_spo2_card_data(user_id)
-        elif any(k in msg_lower for k in ["hrv", "heart rate variability", "variability"]):
-            card_task = get_hrv_card_data(user_id)
-        elif any(k in msg_lower for k in ["heart rate", "pulse", "bpm", "snore", "snoring"]):
-            card_task = get_hr_card_data(user_id)
-        elif any(k in msg_lower for k in ["steps", "walked", "walking", "step count"]):
-            card_task = get_steps_card_data(user_id)
-        elif any(k in msg_lower for k in ["temperature", "temp", "fever", "body temp", "body temperature"]):
-            card_task = get_temperature_card_data(user_id)
-        elif any(k in msg_lower for k in ["stress", "stress level", "anxiety", "stressed"]):
-            card_task = get_stress_card_data(user_id)
-        elif any(k in msg_lower for k in ["period", "cycle", "menstrual", "menstruation", "ovulation", "pms", "fertile", "women health"]):
-            card_task = get_cycle_card_data(user_id)
 
-        # 4. Single direct LLM call with complete grounded context (1 LLM call total!)
-        llm = get_medxai_llm()
-        full_user_content = f"PATIENT DATA:\n{patient_data}\n\nUSER QUESTION:\n{message}"
-        
-        if card_task:
-            llm_res, card = await asyncio.gather(
-                llm.ainvoke([
-                    SystemMessage(content=SYSTEM_PROMPT + "\n- Direct response mode: Answer the user question in plain text using the patient data provided. Do not output tool calls."),
-                    HumanMessage(content=full_user_content)
-                ]),
-                card_task
-            )
+    # 3. Prior turns, the vital card, and knowledge excerpts together.
+    from services.chat_history import load_prior_turns
+
+    prior_task = None
+    if conversation_id and user_id and user_id != "anonymous":
+        prior_task = load_prior_turns(conversation_id, user_id)
+
+    card_builder = _CARD_BUILDERS.get(select_card_kind(message))
+    card_task = card_builder(user_id) if card_builder else None
+    excerpt_task = _medical_excerpts(message)
+
+    tasks = [excerpt_task]
+    if prior_task:
+        tasks.append(prior_task)
+    if card_task:
+        tasks.append(card_task)
+    results = await asyncio.gather(*tasks)
+    excerpts = results[0]
+    index = 1
+    prior: list[tuple[str, str]] = []
+    if prior_task:
+        prior = results[index]
+        index += 1
+    card = results[index] if card_task else None
+
+    sections = [f"PATIENT DATA:\n{patient_data}"]
+    if excerpts:
+        sections.append(f"MEDICAL EXCERPTS:\n{excerpts}")
+    sections.append(f"USER QUESTION:\n{message}")
+    full_user_content = "\n\n".join(sections)
+
+    llm_messages = [
+        SystemMessage(
+            content=SYSTEM_PROMPT
+            + "\n- Direct response mode: answer in plain text from PATIENT DATA and MEDICAL EXCERPTS. Do not output tool calls."
+        )
+    ]
+    for role, content in prior:
+        if role == "assistant":
+            llm_messages.append(AIMessage(content=content))
         else:
-            llm_res = await llm.ainvoke([
-                SystemMessage(content=SYSTEM_PROMPT + "\n- Direct response mode: Answer the user question in plain text using the patient data provided. Do not output tool calls."),
-                HumanMessage(content=full_user_content)
-            ])
-            card = None
+            llm_messages.append(HumanMessage(content=content))
+    llm_messages.append(HumanMessage(content=full_user_content))
 
-        t_done = time.monotonic()
-        reply = str(llm_res.content).strip()
+    llm = get_medxai_llm()
+    llm_res = await llm.ainvoke(llm_messages)
+    reply = message_text(llm_res.content)
+    if not reply:
+        raise RuntimeError("The model returned an empty reply")
 
-        print(f"[TIMING] 1-SHOT OPTIMIZED CHAT TOTAL: {t_done - t_start:.2f}s")
-        return reply, card
-    except Exception as e:
-        return f"Agent error: {str(e)}", None
+    print(f"[TIMING] 1-SHOT OPTIMIZED CHAT TOTAL: {time.monotonic() - t_start:.2f}s")
+    return reply, card

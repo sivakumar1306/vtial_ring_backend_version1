@@ -89,6 +89,47 @@ def retrieve_context(query: str, match_count: int = 5) -> list:
     }).execute()
     return result.data
 
+def retrieve_for_chat(query: str, match_count: int = 3):
+    """Sync retrieval for /chat.
+
+    Returns None when the question is only about this person's ring data,
+    so the caller skips the embedding model. Returns a list (possibly empty)
+    for every other question.
+    """
+    if classify_intent(query) == "biometric":
+        return None
+    return retrieve_context(query, match_count) or []
+
+
+def excerpts_text(results: list | None, limit: int = 4000) -> str:
+    """Knowledge-base passages that cleared the similarity bar."""
+    if not results:
+        return ""
+    parts = []
+    for row in results:
+        try:
+            similarity = float(row.get("similarity") or 0)
+        except (TypeError, ValueError):
+            similarity = 0
+        if similarity < SIMILARITY_THRESHOLD:
+            continue
+        content = str(row.get("content") or "").strip()
+        if not content:
+            continue
+        source = row.get("source") or "knowledge base"
+        parts.append(f"[Source: {source}]\n{content}")
+    return "\n\n".join(parts)[:limit]
+
+
+async def schedule_expansion(query: str, results: list | None) -> None:
+    """MedlinePlus ingest for a thin match. Does not block the chat reply."""
+    if results and float(results[0].get("similarity") or 0) >= SIMILARITY_THRESHOLD:
+        return
+    task = asyncio.create_task(_expand_knowledge_base(query))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
 async def retrieve_context_with_expansion(query: str, match_count: int = 5) -> list:
     """
     Retrieve context and return it immediately. If the top match's similarity

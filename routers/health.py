@@ -1,16 +1,18 @@
 import asyncio
-from fastapi import APIRouter
+from fastapi import APIRouter, Header
 from datetime import datetime, timedelta, timezone
 import json
 import os
 from db.supabase import supabase
+from services.identity import resolve_user_id
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
 
 router = APIRouter()
 
 @router.get("/health-data/{user_id}")
-async def get_health_data(user_id: str):
+async def get_health_data(user_id: str, authorization: str | None = Header(default=None)):
+    user_id = await resolve_user_id(authorization, user_id, allow_anonymous=False)
     try:
         def _fetch():
             latest = supabase.table("ring_data")\
@@ -364,7 +366,8 @@ def _generate_suggested_questions(changes: list, alarming_changes: list, current
 
 
 @router.get("/insights/{user_id}")
-async def get_insights(user_id: str):
+async def get_insights(user_id: str, authorization: str | None = Header(default=None)):
+    user_id = await resolve_user_id(authorization, user_id, allow_anonymous=False)
     # Fixed 30-day ceiling — see MAX_INSIGHT_DAYS. The app no longer lets the
     # user pick a range, so there is nothing to read from query params here.
     days = MAX_INSIGHT_DAYS
